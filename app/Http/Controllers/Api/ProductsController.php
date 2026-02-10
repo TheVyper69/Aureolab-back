@@ -7,6 +7,7 @@ use App\Models\Category;
 use App\Models\Inventory;
 use App\Models\Product;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class ProductsController extends Controller
 {
@@ -184,5 +185,58 @@ class ProductsController extends Controller
         $p = Product::whereNull('deleted_at')->findOrFail($id);
         $p->delete();
         return response()->json(['ok'=>true]);
+    }
+    public function addStock(Request $request, $productId)
+    {
+        $data = $request->validate([
+            'qty'  => ['required','integer','min:1'],
+            'note' => ['nullable','string','max:255'],
+        ]);
+
+        $userId = optional($request->user())->id;
+
+        DB::transaction(function () use ($productId, $data, $userId) {
+
+            // asegurar fila en inventory
+            DB::table('inventory')->updateOrInsert(
+                ['product_id' => $productId],
+                [
+                    'stock' => DB::raw('COALESCE(stock,0)'),
+                    'updated_at' => now(),
+                    'created_at' => now(),
+                ]
+            );
+
+            // movimiento (auditoría)
+            DB::table('inventory_movements')->insert([
+                'product_id' => $productId,
+                'variant_id' => null,
+                'movement_type' => 'in',
+                'qty' => $data['qty'],
+                'reference_type' => 'manual',
+                'reference_id' => null,
+                'note' => $data['note'] ?? 'Entrada manual',
+                'created_by' => $userId,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            // aumentar stock
+            DB::table('inventory')
+                ->where('product_id', $productId)
+                ->update([
+                    'stock' => DB::raw('stock + '.(int)$data['qty']),
+                    'last_entry_date' => DB::raw('CURDATE()'),
+                    'updated_at' => now(),
+                ]);
+        });
+
+        $row = DB::table('inventory')->select('product_id','stock')->where('product_id',$productId)->first();
+
+        return response()->json([
+            'ok' => true,
+            'product_id' => (int)$productId,
+            'stock' => (int)($row->stock ?? 0),
+        ]);
     }
 }

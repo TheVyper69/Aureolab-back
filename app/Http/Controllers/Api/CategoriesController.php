@@ -3,17 +3,20 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Category;
 use Illuminate\Http\Request;
+use App\Models\Category;
 
 class CategoriesController extends Controller
 {
     public function index()
     {
-        return Category::query()
+        // retorna activas y no borradas
+        $cats = Category::query()
             ->whereNull('deleted_at')
             ->orderBy('name')
             ->get(['id','code','name','description']);
+
+        return response()->json($cats);
     }
 
     public function store(Request $request)
@@ -25,12 +28,13 @@ class CategoriesController extends Controller
         ]);
 
         $cat = Category::create($data);
+
         return response()->json($cat, 201);
     }
 
     public function update(Request $request, $id)
     {
-        $cat = Category::whereNull('deleted_at')->findOrFail($id);
+        $cat = Category::query()->whereNull('deleted_at')->findOrFail($id);
 
         $data = $request->validate([
             'code' => ['required','string','max:40',"unique:categories,code,{$cat->id}"],
@@ -39,19 +43,15 @@ class CategoriesController extends Controller
         ]);
 
         $cat->update($data);
+
         return response()->json($cat);
     }
 
     public function destroy($id)
     {
-        $cat = Category::whereNull('deleted_at')->findOrFail($id);
-
-        // opcional: bloquear si hay productos usando esa categoría
-        // if(\App\Models\Product::where('category_id',$cat->id)->whereNull('deleted_at')->exists()){
-        //   return response()->json(['message'=>'No puedes borrar: hay productos en esta categoría'], 409);
-        // }
-
+        $cat = Category::query()->whereNull('deleted_at')->findOrFail($id);
         $cat->delete();
+
         return response()->json(['ok'=>true]);
     }
 }

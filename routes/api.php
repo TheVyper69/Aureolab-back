@@ -53,6 +53,7 @@ Route::middleware(['auth:sanctum','role:admin'])->group(function () {
     Route::post('/products', [ProductsController::class, 'store']);
     Route::put('/products/{id}', [ProductsController::class, 'update']);     // ✅ NECESARIA
     Route::delete('/products/{id}', [ProductsController::class, 'destroy']);
+      Route::post('/products/{id}/stock', [ProductsController::class, 'addStock']);
 
     // (opcional) si usarás FormData con POST + _method=PUT
     Route::post('/products/{id}', [ProductsController::class, 'update']);   // ✅ OPCIONAL
@@ -62,7 +63,7 @@ Route::middleware(['auth:sanctum','role:admin'])->group(function () {
     // Categories
     Route::get('/categories', [CategoriesController::class, 'index']);
     Route::post('/categories', [CategoriesController::class, 'store']);
-    Route::put('/categories/{id}', [CategoriesController::class, 'update']); // ✅ NECESARIA
+    Route::put('/categories/{id}', [CategoriesController::class, 'update']);
     Route::delete('/categories/{id}', [CategoriesController::class, 'destroy']);
 
     // (opcional)

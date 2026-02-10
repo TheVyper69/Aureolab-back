@@ -51,5 +51,6 @@ class InventoryController extends Controller
 
         return response()->json($data);
     }
+    
 }
 
