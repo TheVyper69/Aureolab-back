@@ -7,17 +7,29 @@ use Illuminate\Database\Eloquent\Model;
 class Product extends Model
 {
     protected $fillable = [
-        'sku','name','description','category_id','sale_price','buy_price',
-        'min_stock','max_stock','active'
+        'sku','name','description','category_id',
+        'type','brand','model','material','size',
+        'buy_price','sale_price','min_stock','max_stock',
+        'supplier_id',
+        'image_filename','image_mime','image_blob',
+        'active'
     ];
 
     protected $casts = [
-        'active' => 'boolean'
+        'buy_price' => 'decimal:2',
+        'sale_price' => 'decimal:2',
+        'min_stock' => 'integer',
+        'max_stock' => 'integer',
+        'active' => 'boolean',
+        'deleted_at' => 'datetime',
+    ];
+    protected $hidden = [
+        'image_blob',
     ];
 
-    public function category()
-    {
-        return $this->belongsTo(Category::class);
+
+    public function category(){
+        return $this->belongsTo(Category::class, 'category_id');
     }
 
     public function inventory()

@@ -4,6 +4,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\InventoryController;
+use App\Http\Controllers\Api\CategoriesController;
+use App\Http\Controllers\Api\ProductsController;
 
 Route::post('/auth/login', [AuthController::class, 'login']);
 
@@ -43,6 +45,29 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
 });
 
+Route::get('/inventory', [InventoryController::class, 'index'])->middleware('auth:sanctum');
+Route::get('/categories', [CategoriesController::class, 'index'])->middleware('auth:sanctum');
+
+Route::middleware(['auth:sanctum','role:admin'])->group(function () {
+     Route::get('/products', [ProductsController::class, 'index']);
+    Route::post('/products', [ProductsController::class, 'store']);
+    Route::put('/products/{id}', [ProductsController::class, 'update']);     // ✅ NECESARIA
+    Route::delete('/products/{id}', [ProductsController::class, 'destroy']);
+
+    // (opcional) si usarás FormData con POST + _method=PUT
+    Route::post('/products/{id}', [ProductsController::class, 'update']);   // ✅ OPCIONAL
+    Route::get('/products/{id}/image', [ProductsController::class, 'image'])
+    ->middleware(['auth:sanctum']);
+
+    // Categories
+    Route::get('/categories', [CategoriesController::class, 'index']);
+    Route::post('/categories', [CategoriesController::class, 'store']);
+    Route::put('/categories/{id}', [CategoriesController::class, 'update']); // ✅ NECESARIA
+    Route::delete('/categories/{id}', [CategoriesController::class, 'destroy']);
+
+    // (opcional)
+    Route::post('/categories/{id}', [CategoriesController::class, 'update']);
+});
 // Route::middleware(['auth:sanctum', 'role:admin'])->group(function () {
 //     Route::get('/admin-only', fn () => ['ok' => true]);
 // });

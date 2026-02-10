@@ -3,14 +3,19 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Category extends Model
 {
-    protected $fillable = ['code','name','description'];
+    use SoftDeletes;
 
-    public function products()
-    {
-        return $this->hasMany(Product::class);
-    }
+    protected $table = 'categories';
+
+    protected $fillable = [
+        'code','name','description'
+    ];
+
+    protected $casts = [
+        'deleted_at' => 'datetime',
+    ];
 }
-
