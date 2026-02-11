@@ -12,16 +12,43 @@ use Illuminate\Support\Facades\DB;
 class ProductsController extends Controller
 {
     private function categoryIdFromRequest(Request $request): int
-    {
-        // Tu front manda "category" como CODE (MICAS, BISEL, etc.)
-        $catCode = $request->input('category');
-        $cat = Category::whereNull('deleted_at')->where('code', $catCode)->first();
-
+{
+    // ✅ 1) category_id (snake) o categoryId (camel)
+    $catId = $request->input('category_id') ?? $request->input('categoryId');
+    if ($catId) {
+        $cat = Category::whereNull('deleted_at')->find($catId);
         if(!$cat){
-            abort(response()->json(['message'=>"Categoría inválida: {$catCode}"], 422));
+            abort(response()->json([
+                'message' => "Categoría inválida: {$catId}",
+                'errors' => ['category_id' => ['Categoría inválida']]
+            ], 422));
         }
         return (int)$cat->id;
     }
+
+    // ✅ 2) category (code o name)
+    $catRaw = $request->input('category');
+    if(!$catRaw){
+        abort(response()->json([
+            'message' => 'The category field is required.',
+            'errors'  => ['category' => ['The category field is required.']]
+        ], 422));
+    }
+
+    $cat = Category::whereNull('deleted_at')
+        ->where('code', $catRaw)
+        ->orWhere('name', $catRaw)
+        ->first();
+
+    if(!$cat){
+        abort(response()->json([
+            'message' => "Categoría inválida: {$catRaw}",
+            'errors' => ['category' => ['Categoría inválida']]
+        ], 422));
+    }
+
+    return (int)$cat->id;
+}
 
     private function fillImage(Product $p, Request $request): void
     {
@@ -36,114 +63,145 @@ class ProductsController extends Controller
     }
 
     public function store(Request $request)
-    {
-        $data = $request->validate([
-            'sku' => ['required','string','max:64','unique:products,sku'],
-            'name' => ['required','string','max:220'],
-            'description' => ['nullable','string'],
+{
+    // ✅ acepta ambos formatos
+    $data = $request->validate([
+        'sku' => ['required','string','max:64','unique:products,sku'],
+        'name' => ['required','string','max:220'],
+        'description' => ['nullable','string'],
 
-            'category' => ['required','string','max:40'], // code
-            'type' => ['nullable','string','max:60'],
-            'brand' => ['nullable','string','max:90'],
-            'model' => ['nullable','string','max:90'],
-            'material' => ['nullable','string','max:90'],
-            'size' => ['nullable','string','max:40'],
+        // puede venir category (code) o category_id
+        'category' => ['required_without:category_id,categoryId','nullable','string','max:40'],
+        'category_id' => ['required_without:category,categoryId','nullable','integer','exists:categories,id'],
+        'categoryId' => ['required_without:category,category_id','nullable','integer','exists:categories,id'],
 
-            'buyPrice' => ['nullable','numeric','min:0'],
-            'salePrice' => ['nullable','numeric','min:0'],
-            'minStock' => ['nullable','integer','min:0'],
-            'maxStock' => ['nullable','integer','min:0'],
 
-            'supplier' => ['nullable','string','max:190'], // si luego lo conviertes a supplier_id, lo cambias
-        ]);
+        'type' => ['nullable','string','max:60'],
+        'brand' => ['nullable','string','max:90'],
+        'model' => ['nullable','string','max:90'],
+        'material' => ['nullable','string','max:90'],
+        'size' => ['nullable','string','max:40'],
 
-        $p = new Product();
-        $p->sku = $data['sku'];
-        $p->name = $data['name'];
-        $p->description = $data['description'] ?? null;
+        // camelCase o snake_case
+        'buyPrice' => ['nullable','numeric','min:0'],
+        'salePrice' => ['nullable','numeric','min:0'],
+        'minStock' => ['nullable','integer','min:0'],
+        'maxStock' => ['nullable','integer','min:0'],
 
-        $p->category_id = $this->categoryIdFromRequest($request);
+        'buy_price' => ['nullable','numeric','min:0'],
+        'sale_price' => ['nullable','numeric','min:0'],
+        'min_stock' => ['nullable','integer','min:0'],
+        'max_stock' => ['nullable','integer','min:0'],
 
-        $p->type = $data['type'] ?? null;
-        $p->brand = $data['brand'] ?? null;
-        $p->model = $data['model'] ?? null;
-        $p->material = $data['material'] ?? null;
-        $p->size = $data['size'] ?? null;
+        'supplier' => ['nullable','string','max:190'],
+        'image' => ['nullable','file','image','max:2048'],
+    ]);
 
-        $p->buy_price = (float)($data['buyPrice'] ?? 0);
-        $p->sale_price = (float)($data['salePrice'] ?? 0);
-        $p->min_stock = (int)($data['minStock'] ?? 0);
-        $p->max_stock = $data['maxStock'] !== null ? (int)$data['maxStock'] : null;
+    $p = new Product();
+    $p->sku = $data['sku'];
+    $p->name = $data['name'];
+    $p->description = $data['description'] ?? null;
 
-        $p->active = 1;
+    // ✅ category_id desde cualquiera de los dos formatos
+    $p->category_id = $this->categoryIdFromRequest($request);
 
-        $this->fillImage($p, $request);
-        $p->save();
+    $p->type = $data['type'] ?? null;
+    $p->brand = $data['brand'] ?? null;
+    $p->model = $data['model'] ?? null;
+    $p->material = $data['material'] ?? null;
+    $p->size = $data['size'] ?? null;
 
-        // crea fila en inventory por default si no existe
-        Inventory::firstOrCreate(
-            ['product_id' => $p->id],
-            ['stock' => 0]
-        );
+    // ✅ toma camelCase si existe, si no snake_case
+    $buy = $request->input('buyPrice', $request->input('buy_price', 0));
+    $sale = $request->input('salePrice', $request->input('sale_price', 0));
+    $min = $request->input('minStock', $request->input('min_stock', 0));
+    $max = $request->input('maxStock', $request->input('max_stock', null));
 
-        return response()->json(['ok'=>true,'id'=>$p->id], 201);
-    }
+    $p->buy_price = (float) $buy;
+    $p->sale_price = (float) $sale;
+    $p->min_stock = (int) $min;
+    $p->max_stock = ($max !== null && $max !== '') ? (int)$max : null;
+
+    $p->active = 1;
+
+    $this->fillImage($p, $request);
+    $p->save();
+
+    Inventory::firstOrCreate(
+        ['product_id' => $p->id],
+        ['stock' => 0]
+    );
+
+    return response()->json(['ok'=>true,'id'=>$p->id], 201);
+}
+
 
     public function update(Request $request, $id)
 {
     $product = Product::findOrFail($id);
 
     $request->validate([
-        'sku' => ['required','string','max:64', 'unique:products,sku,'.$product->id],
-        'name' => ['required','string','max:220'],
-        'category' => ['required'], // viene como code o name
+        'sku' => ['nullable','string','max:64', 'unique:products,sku,'.$product->id],
+        'name' => ['nullable','string','max:220'],
+
+        // puede venir category o category_id
+        'category' => ['required_without:category_id,categoryId','nullable','string','max:40'],
+        'category_id' => ['required_without:category,categoryId','nullable','integer','exists:categories,id'],
+        'categoryId' => ['required_without:category,category_id','nullable','integer','exists:categories,id'],
+
+
+        'description' => ['nullable','string'],
+        'supplier' => ['nullable','string','max:190'],
+
+        // camelCase o snake_case
         'buyPrice' => ['nullable','numeric','min:0'],
         'salePrice' => ['nullable','numeric','min:0'],
         'minStock' => ['nullable','integer','min:0'],
         'maxStock' => ['nullable','integer','min:0'],
-        'description' => ['nullable','string'],
-        'supplier' => ['nullable','string'],
+
+        'buy_price' => ['nullable','numeric','min:0'],
+        'sale_price' => ['nullable','numeric','min:0'],
+        'min_stock' => ['nullable','integer','min:0'],
+        'max_stock' => ['nullable','integer','min:0'],
+
         'image' => ['nullable','file','image','max:2048'],
     ]);
 
-    // category -> category_id
-    $cat = Category::where('code', $request->category)
-        ->orWhere('name', $request->category)
-        ->first();
+    // ✅ category_id desde cualquiera
+    $catId = $this->categoryIdFromRequest($request);
 
-    if(!$cat){
-        return response()->json([
-            'message' => 'Categoría inválida',
-            'errors' => ['category' => ['Categoría inválida']]
-        ], 422);
-    }
+    $buy = $request->input('buyPrice', $request->input('buy_price', 0));
+    $sale = $request->input('salePrice', $request->input('sale_price', 0));
+    $min = $request->input('minStock', $request->input('min_stock', 0));
+    $max = $request->input('maxStock', $request->input('max_stock', null));
 
     $data = [
-        'sku' => $request->sku,
-        'name' => $request->name,
-        'description' => $request->description,
-        'category_id' => $cat->id,
+        'sku' => $request->input('sku'),
+        'name' => $request->input('name'),
+        'description' => $request->input('description'),
+        'category_id' => $catId,
 
-        'buy_price' => $request->buyPrice ?? 0,
-        'sale_price' => $request->salePrice ?? 0,
-        'min_stock' => $request->minStock ?? 0,
-        'max_stock' => $request->maxStock,
-
-        // si luego haces supplier_id real, aquí lo mapeas
+        'buy_price' => (float)$buy,
+        'sale_price' => (float)$sale,
+        'min_stock' => (int)$min,
+        'max_stock' => ($max !== null && $max !== '') ? (int)$max : null,
     ];
 
-    // Imagen (si llegó)
+    // ✅ Imagen (si llegó)
     if($request->hasFile('image')){
         $file = $request->file('image');
-        $data['image_filename'] = $file->getClientOriginalName();
-        $data['image_mime'] = $file->getMimeType();
-        $data['image_blob'] = file_get_contents($file->getRealPath());
+        if($file && $file->isValid()){
+            $data['image_filename'] = $file->getClientOriginalName();
+            $data['image_mime'] = $file->getMimeType();
+            $data['image_blob'] = file_get_contents($file->getRealPath());
+        }
     }
 
     $product->update($data);
 
-    return response()->json(['ok'=>true]);
+    return response()->json(['ok'=>true, 'id'=>$product->id]);
 }
+
 
     public function image($id)
 {
@@ -239,4 +297,26 @@ class ProductsController extends Controller
             'stock' => (int)($row->stock ?? 0),
         ]);
     }
+
+    public function show($id)
+{
+    $p = Product::with('category')
+        ->whereNull('deleted_at')
+        ->findOrFail($id);
+
+    return response()->json([
+        'id' => $p->id,
+        'sku' => $p->sku,
+        'name' => $p->name,
+        'description' => $p->description,
+        'category' => $p->category?->code ?? null,   // si manejas code
+        'category_label' => $p->category?->name ?? null,
+        'buy_price' => $p->buy_price,
+        'sale_price' => $p->sale_price,
+        'min_stock' => $p->min_stock,
+        'max_stock' => $p->max_stock,
+        'active' => (bool)$p->active,
+        'has_image' => !empty($p->image_blob),
+    ]);
+}
 }

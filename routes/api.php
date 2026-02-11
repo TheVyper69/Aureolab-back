@@ -51,6 +51,7 @@ Route::get('/categories', [CategoriesController::class, 'index'])->middleware('a
 Route::middleware(['auth:sanctum','role:admin'])->group(function () {
      Route::get('/products', [ProductsController::class, 'index']);
     Route::post('/products', [ProductsController::class, 'store']);
+    Route::get('/products/{id}', [ProductsController::class, 'show']);
     Route::put('/products/{id}', [ProductsController::class, 'update']);     // ✅ NECESARIA
     Route::delete('/products/{id}', [ProductsController::class, 'destroy']);
       Route::post('/products/{id}/stock', [ProductsController::class, 'addStock']);
