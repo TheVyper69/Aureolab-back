@@ -50,6 +50,43 @@ class ProductsController extends Controller
     return (int)$cat->id;
 }
 
+    public function index()
+{
+    $products = Product::with(['category:id,code,name'])
+        ->whereNull('deleted_at')
+        ->where('active', 1)
+        ->orderBy('name')
+        ->get();
+
+    return response()->json(
+        $products->map(function($p){
+            return [
+                'id' => $p->id,
+                'sku' => $p->sku,
+                'name' => $p->name,
+                'description' => $p->description,
+
+                // ✅ para filtros del POS (tu pos.js usa p.category como string)
+                'category' => $p->category?->code ?? $p->category?->name ?? null,
+                'category_label' => $p->category?->name ?? null,
+
+                'type' => $p->type,
+                'supplier' => $p->supplier,
+
+                // ✅ camelCase para tu front
+                'buyPrice' => (float)$p->buy_price,
+                'salePrice' => (float)$p->sale_price,
+                'minStock' => (int)$p->min_stock,
+                'maxStock' => $p->max_stock !== null ? (int)$p->max_stock : null,
+
+                // ✅ imagen (el POS usa p.imageUrl o p.image_url)
+                'imageUrl' => $p->image_filename ? url("/api/products/{$p->id}/image") : null,
+                'has_image' => !empty($p->image_blob),
+            ];
+        })
+    );
+}
+
     private function fillImage(Product $p, Request $request): void
     {
         if(!$request->hasFile('image')) return;
