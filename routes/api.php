@@ -8,9 +8,16 @@ use App\Http\Controllers\Api\InventoryController;
 use App\Http\Controllers\Api\CategoriesController;
 use App\Http\Controllers\Api\ProductsController;
 use App\Http\Controllers\Api\SalesController;
+use App\Http\Controllers\Api\OpticasController;
 
 Route::post('/auth/login', [AuthController::class, 'login']);
 
+Route::middleware(['auth:sanctum','role:admin'])->group(function () {
+    Route::post('/opticas', [OpticasController::class, 'store']);
+
+     Route::get('/opticas', [OpticasController::class, 'index']);
+
+});
 Route::middleware('auth:sanctum')->group(function () {
 
     Route::post('/auth/logout', [AuthController::class, 'logout']);
@@ -47,11 +54,15 @@ Route::middleware('auth:sanctum')->group(function () {
                 'message' => 'Use POST /api/sales to create a sale.'
             ], 405);
         });
+
+        Route::get('/opticas', [OpticasController::class, 'index']);
     });
 
     /**
      * ✅ SOLO ADMIN: CRUD + stock
      */
+    Route::middleware(['auth:sanctum','role:admin'])->post('/auth/register', [AuthController::class, 'register']);
+
     Route::middleware('role:admin')->group(function () {
 
         // Productos
