@@ -9,8 +9,17 @@ use App\Http\Controllers\Api\CategoriesController;
 use App\Http\Controllers\Api\ProductsController;
 use App\Http\Controllers\Api\SalesController;
 use App\Http\Controllers\Api\OpticasController;
+use App\Http\Controllers\Api\OrdersController;
 
 Route::post('/auth/login', [AuthController::class, 'login']);
+
+Route::middleware('auth:sanctum')->group(function () {
+    Route::middleware('role:admin,employee,optica')->group(function () {
+        Route::get('/orders', [OrdersController::class, 'index']);
+        Route::post('/orders', [OrdersController::class, 'store']);
+        Route::get('/orders/{id}', [OrdersController::class, 'show']);
+    });
+});
 
 Route::middleware(['auth:sanctum','role:admin'])->group(function () {
     Route::post('/opticas', [OpticasController::class, 'store']);

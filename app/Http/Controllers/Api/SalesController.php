@@ -49,7 +49,6 @@ class SalesController extends Controller
         $customerName = ($data['customer_name'] ?? 'Mostrador');
 
         if ($userRoleId === 3) {
-            $customerId = $userId;                // ✅ users.id
             $customerName = $user?->name ?? 'Óptica';
         } else {
             // Si admin/empleado manda customer_id, validar que sea una "óptica" (role_id=3) en users
