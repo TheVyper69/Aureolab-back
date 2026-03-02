@@ -86,4 +86,5 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/categories/{id}', [CategoriesController::class, 'update']);
         Route::delete('/categories/{id}', [CategoriesController::class, 'destroy']);
     });
+    Route::patch('/orders/{id}/cancel', [OrdersController::class, 'cancel']);
 });
