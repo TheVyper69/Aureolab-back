@@ -88,3 +88,4 @@ Route::middleware('auth:sanctum')->group(function () {
     });
     Route::patch('/orders/{id}/cancel', [OrdersController::class, 'cancel']);
 });
+
