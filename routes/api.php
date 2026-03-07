@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\ProductsController;
 use App\Http\Controllers\Api\SalesController;
 use App\Http\Controllers\Api\OpticasController;
 use App\Http\Controllers\Api\OrdersController;
+use App\Http\Controllers\Api\TreatmentsController;
 
 Route::post('/auth/login', [AuthController::class, 'login']);
 
@@ -21,14 +22,12 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 });
 
-Route::middleware(['auth:sanctum','role:admin'])->group(function () {
+Route::middleware(['auth:sanctum', 'role:admin'])->group(function () {
     Route::post('/opticas', [OpticasController::class, 'store']);
-
-     Route::get('/opticas', [OpticasController::class, 'index']);
-
+    Route::get('/opticas', [OpticasController::class, 'index']);
 });
-Route::middleware('auth:sanctum')->group(function () {
 
+Route::middleware('auth:sanctum')->group(function () {
     Route::post('/auth/logout', [AuthController::class, 'logout']);
 
     Route::get('/me', function (Request $request) {
@@ -39,24 +38,20 @@ Route::middleware('auth:sanctum')->group(function () {
         ]);
     });
 
-    /**
-     * ✅ POS / staff (admin, employee, optica) - SOLO LECTURA + ventas
-     */
     Route::middleware('role:admin,employee,optica')->group(function () {
-
-        // Catálogo / stock / categorías
         Route::get('/products', [ProductsController::class, 'index']);
         Route::get('/inventory', [InventoryController::class, 'index']);
         Route::get('/categories', [CategoriesController::class, 'index']);
 
-        // Imagen protegida (requiere token)
+        // NUEVO: tratamientos
+        Route::get('/treatments', [TreatmentsController::class, 'index']);
+        Route::get('/products/{id}/treatments', [TreatmentsController::class, 'byProduct']);
+
         Route::get('/products/{id}/image', [ProductsController::class, 'image']);
 
-        // Ventas
         Route::post('/sales', [SalesController::class, 'store']);
         Route::get('/sales/{id}', [SalesController::class, 'show']);
 
-        // ✅ evita 405 feo si alguien abre /api/sales en navegador
         Route::get('/sales', function () {
             return response()->json([
                 'ok' => false,
@@ -67,25 +62,19 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/opticas', [OpticasController::class, 'index']);
     });
 
-    /**
-     * ✅ SOLO ADMIN: CRUD + stock
-     */
-    Route::middleware(['auth:sanctum','role:admin'])->post('/auth/register', [AuthController::class, 'register']);
+    Route::middleware(['auth:sanctum', 'role:admin'])->post('/auth/register', [AuthController::class, 'register']);
 
     Route::middleware('role:admin')->group(function () {
-
-        // Productos
         Route::post('/products', [ProductsController::class, 'store']);
         Route::get('/products/{id}', [ProductsController::class, 'show']);
         Route::put('/products/{id}', [ProductsController::class, 'update']);
         Route::delete('/products/{id}', [ProductsController::class, 'destroy']);
         Route::post('/products/{id}/stock', [ProductsController::class, 'addStock']);
 
-        // Categorías
         Route::post('/categories', [CategoriesController::class, 'store']);
         Route::put('/categories/{id}', [CategoriesController::class, 'update']);
         Route::delete('/categories/{id}', [CategoriesController::class, 'destroy']);
     });
+
     Route::patch('/orders/{id}/cancel', [OrdersController::class, 'cancel']);
 });
-
