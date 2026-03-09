@@ -25,7 +25,7 @@ class OrdersController extends Controller
         $q = Order::query()
             ->whereNull('deleted_at')
             ->with([
-                'items.product:id,sku,name,category_id,type,sale_price',
+                'items.product:id,sku,name,category_id,type,sale_price,sphere,cylinder',
             ])
             ->orderByDesc('id');
 
@@ -51,9 +51,43 @@ class OrdersController extends Controller
             $q->where('optica_id', $u->optica_id);
         }
 
-        return response()->json(
-            $q->paginate($perPage)->appends($request->query())
-        );
+        $orders = $q->paginate($perPage)->appends($request->query());
+
+        $orderIds = collect($orders->items())->pluck('id')->all();
+
+        if (!empty($orderIds)) {
+            $itemsWithTreatments = DB::table('order_items as oi')
+                ->leftJoin('order_item_treatments as oit', 'oit.order_item_id', '=', 'oi.id')
+                ->leftJoin('treatments as t', 't.id', '=', 'oit.treatment_id')
+                ->whereIn('oi.order_id', $orderIds)
+                ->select(
+                    'oi.id as order_item_id',
+                    't.id as treatment_id',
+                    't.name as treatment_name',
+                    't.code as treatment_code'
+                )
+                ->get()
+                ->groupBy('order_item_id');
+
+            $orders->getCollection()->transform(function ($order) use ($itemsWithTreatments) {
+                $order->items->transform(function ($item) use ($itemsWithTreatments) {
+                    $item->treatments = collect($itemsWithTreatments->get($item->id, []))
+                        ->filter(fn ($row) => !empty($row->treatment_id))
+                        ->map(fn ($row) => [
+                            'id' => $row->treatment_id,
+                            'name' => $row->treatment_name,
+                            'code' => $row->treatment_code,
+                        ])
+                        ->values();
+
+                    return $item;
+                });
+
+                return $order;
+            });
+        }
+
+        return response()->json($orders);
     }
 
     public function store(Request $request)
@@ -80,8 +114,6 @@ class OrdersController extends Controller
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
             'items.*.axis' => ['nullable', 'integer'],
             'items.*.item_notes' => ['nullable', 'string'],
-
-            // NUEVO: múltiples tratamientos por item
             'items.*.treatments' => ['nullable', 'array'],
             'items.*.treatments.*' => ['integer', 'exists:treatments,id'],
         ]);
@@ -135,7 +167,7 @@ class OrdersController extends Controller
                     ], 422));
                 }
 
-                $isMica = strtoupper((string)($product->category_code ?? '')) === 'MICAS';
+                $isMica = strtoupper((string) ($product->category_code ?? '')) === 'MICAS';
 
                 $treatments = collect($it['treatments'] ?? [])
                     ->map(fn ($v) => (int) $v)
@@ -161,7 +193,6 @@ class OrdersController extends Controller
                         ->map(fn ($v) => (int) $v)
                         ->all();
 
-                    // Si el producto tiene restricciones configuradas, se validan.
                     if (!empty($allowed)) {
                         $invalid = $treatments
                             ->reject(fn ($id) => in_array($id, $allowed, true))
@@ -291,13 +322,15 @@ class OrdersController extends Controller
         $u = $request->user();
         $role = $u?->role?->name;
 
-        if ($role !== 'optica') {
+        if (!in_array($role, ['optica', 'admin', 'employee'], true)) {
             return response()->json(['message' => 'No autorizado'], 403);
         }
 
-        $order = Order::with(['items.product:id,sku,name,category_id,type,sale_price'])->findOrFail($id);
+        $order = Order::with([
+            'items.product:id,sku,name,category_id,type,sale_price,sphere,cylinder'
+        ])->findOrFail($id);
 
-        if ((int) $order->optica_id !== (int) $u->optica_id) {
+        if ($role === 'optica' && (int) $order->optica_id !== (int) $u->optica_id) {
             return response()->json(['message' => 'No autorizado'], 403);
         }
 

@@ -12,6 +12,8 @@ use App\Http\Controllers\Api\OpticasController;
 use App\Http\Controllers\Api\OrdersController;
 use App\Http\Controllers\Api\TreatmentsController;
 
+
+
 Route::post('/auth/login', [AuthController::class, 'login']);
 
 Route::middleware('auth:sanctum')->group(function () {
