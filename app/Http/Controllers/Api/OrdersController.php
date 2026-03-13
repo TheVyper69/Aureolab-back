@@ -420,4 +420,150 @@ class OrdersController extends Controller
             return response()->json(['ok' => true, 'order_id' => $order->id], 200);
         });
     }
+
+    public function update(Request $request, $id)
+    {
+        $u = $request->user();
+        $role = $u?->role?->name;
+
+        if (!in_array($role, ['admin', 'employee'], true)) {
+            return response()->json(['message' => 'No autorizado'], 403);
+        }
+
+        $data = $request->validate([
+            'payment_status' => ['nullable', 'in:pendiente,pagado'],
+            'process_status' => ['nullable', 'in:en_proceso,listo_para_entregar,entregado,revision,en_preparacion,cancelado'],
+        ]);
+
+        return DB::transaction(function () use ($id, $u, $role, $data) {
+            $order = Order::query()
+                ->whereNull('deleted_at')
+                ->with('items')
+                ->lockForUpdate()
+                ->findOrFail($id);
+
+            $oldPayment = $order->payment_status;
+            $oldProcess = $order->process_status;
+
+            $newPayment = array_key_exists('payment_status', $data) ? $data['payment_status'] : $oldPayment;
+            $newProcess = array_key_exists('process_status', $data) ? $data['process_status'] : $oldProcess;
+
+            // EMPLOYEE: solo puede tocar process_status
+            if ($role === 'employee') {
+                if ($newPayment !== $oldPayment) {
+                    return response()->json([
+                        'message' => 'Solo admin puede cambiar el estatus de pago'
+                    ], 403);
+                }
+
+                if ($oldProcess === 'entregado' && $newProcess !== $oldProcess) {
+                    return response()->json([
+                        'message' => 'Entregado: solo admin puede moverlo a revisión'
+                    ], 403);
+                }
+
+                if ($newProcess === 'revision') {
+                    return response()->json([
+                        'message' => 'Solo admin puede poner el pedido en revisión'
+                    ], 403);
+                }
+
+                if ($newProcess === 'cancelado') {
+                    return response()->json([
+                        'message' => 'Solo admin puede cancelar pedidos desde esta acción'
+                    ], 403);
+                }
+            }
+
+            // ADMIN: puede cambiar payment_status
+            if ($newPayment !== $oldPayment) {
+                $order->payment_status = $newPayment;
+
+                if ($newPayment === 'pagado') {
+                    $order->paid_at = now();
+                } elseif ($newPayment === 'pendiente') {
+                    $order->paid_at = null;
+                }
+            }
+
+            // ADMIN y EMPLOYEE: pueden cambiar process_status con reglas
+            if ($newProcess !== $oldProcess) {
+                // Si pasa a entregado: baja reserved y baja stock
+                if ($newProcess === 'entregado' && $oldProcess !== 'entregado') {
+                    foreach ($order->items as $it) {
+                        $pid = (int) $it->product_id;
+                        $qty = (int) $it->qty;
+
+                        DB::table('inventory')
+                            ->where('product_id', $pid)
+                            ->lockForUpdate()
+                            ->update([
+                                'reserved' => DB::raw('GREATEST(reserved - ' . $qty . ', 0)'),
+                                'stock' => DB::raw('GREATEST(stock - ' . $qty . ', 0)'),
+                                'updated_at' => now(),
+                            ]);
+
+                        if (DB::getSchemaBuilder()->hasTable('inventory_movements')) {
+                            DB::table('inventory_movements')->insert([
+                                'product_id' => $pid,
+                                'variant_id' => $it->variant_id,
+                                'movement_type' => 'out',
+                                'qty' => $qty,
+                                'reference_type' => 'order',
+                                'reference_id' => $order->id,
+                                'note' => 'Salida por pedido entregado',
+                                'created_by' => $u->id,
+                                'created_at' => now(),
+                                'updated_at' => now(),
+                            ]);
+                        }
+                    }
+                }
+
+                // Si sale de entregado a otro estado: reponer stock y reserva
+                if ($oldProcess === 'entregado' && $newProcess !== 'entregado') {
+                    foreach ($order->items as $it) {
+                        $pid = (int) $it->product_id;
+                        $qty = (int) $it->qty;
+
+                        DB::table('inventory')
+                            ->where('product_id', $pid)
+                            ->lockForUpdate()
+                            ->update([
+                                'stock' => DB::raw('stock + ' . $qty),
+                                'reserved' => DB::raw('reserved + ' . $qty),
+                                'updated_at' => now(),
+                            ]);
+
+                        if (DB::getSchemaBuilder()->hasTable('inventory_movements')) {
+                            DB::table('inventory_movements')->insert([
+                                'product_id' => $pid,
+                                'variant_id' => $it->variant_id,
+                                'movement_type' => 'adjustment',
+                                'qty' => $qty,
+                                'reference_type' => 'order',
+                                'reference_id' => $order->id,
+                                'note' => 'Reverso de entrega por cambio de estatus',
+                                'created_by' => $u->id,
+                                'created_at' => now(),
+                                'updated_at' => now(),
+                            ]);
+                        }
+                    }
+                }
+
+                $order->process_status = $newProcess;
+            }
+
+            $order->save();
+
+            return response()->json([
+                'ok' => true,
+                'order_id' => $order->id,
+                'payment_status' => $order->payment_status,
+                'paid_at' => $order->paid_at,
+                'process_status' => $order->process_status,
+            ]);
+        });
+    }
 }
