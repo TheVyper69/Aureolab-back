@@ -1,12 +1,14 @@
 // public/assets/js/pages/orders.js
-// - PAGINADO
+// - DataTables en vista óptica y admin/employee
+// - Sin paginado manual
+// - Recarga la tabla después de actualizar estatus
 // - Óptica: solo ve sus pedidos
 // - Admin/Employee: ven todos
 // - Modal de detalle del pedido
 // - Cambio de estatus
 // - Botón para ver detalle completo del producto ordenado
 // - Muestra tratamientos, eje y notas por item
-// - SIN tabla de stock disponible en vista óptica
+// - Muestra fecha de pago si existe
 
 import { api } from '../services/api.js';
 import { ordersService } from '../services/ordersService.js';
@@ -86,6 +88,7 @@ function normalizeOrder(o) {
   const processStatus = o.processStatus ?? o.process_status ?? 'en_proceso';
 
   const date = o.date ?? o.created_at ?? o.createdAt ?? null;
+  const paidAt = o.paidAt ?? o.paid_at ?? null;
   const opticaId = o.opticaId ?? o.optica_id ?? null;
 
   const paymentMethod =
@@ -125,6 +128,7 @@ function normalizeOrder(o) {
     ...o,
     id: o.id,
     date,
+    paidAt,
     opticaId,
     paymentMethod,
     paymentStatus,
@@ -143,6 +147,26 @@ function badgeHtml(type, value) {
   }
   const v = value || 'en_proceso';
   return `<span class="badge ${PROCESS_BADGE[v] || 'text-bg-secondary'}">${safe(PROCESS_LABEL[v] || v)}</span>`;
+}
+
+function initDataTable(selector) {
+  if (!(window.$ && $.fn.dataTable)) return null;
+
+  if ($.fn.DataTable.isDataTable(selector)) {
+    $(selector).DataTable().destroy();
+  }
+
+  return $(selector).DataTable({
+    pageLength: 10,
+    order: [[1, 'desc']],
+    language: {
+      search: 'Buscar:',
+      lengthMenu: 'Mostrar _MENU_',
+      info: 'Mostrando _START_ a _END_ de _TOTAL_',
+      paginate: { previous: 'Anterior', next: 'Siguiente' },
+      zeroRecords: 'No hay registros'
+    }
+  });
 }
 
 async function loadOpticasIndex() {
@@ -183,17 +207,18 @@ function unwrapPaginated(resp) {
   return { rows, meta };
 }
 
-async function fetchOrdersPage(page = 1) {
+async function fetchOrdersAll() {
   try {
     if (typeof ordersService?.list === 'function') {
-      const maybe = await ordersService.list(page);
+      const maybe = await ordersService.list(1, 1000);
       const un = unwrapPaginated(maybe);
-      if (un.rows.length || un.meta) return un;
+      return un.rows || [];
     }
   } catch (_e) {}
 
-  const { data } = await api.get(`/orders?page=${encodeURIComponent(page)}`);
-  return unwrapPaginated(data);
+  const { data } = await api.get('/orders?per_page=1000');
+  const un = unwrapPaginated(data);
+  return un.rows || [];
 }
 
 function showOrderedProductDetail(product, fallback = {}) {
@@ -449,6 +474,20 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
       </div>
     `;
 
+  const paidAtHtml = o.paidAt
+    ? `
+      <div class="col-6">
+        <div class="small text-muted">Fecha de pago</div>
+        <div class="fw-semibold">${safe(formatDateTime(o.paidAt))}</div>
+      </div>
+    `
+    : `
+      <div class="col-6">
+        <div class="small text-muted">Fecha de pago</div>
+        <div class="fw-semibold">—</div>
+      </div>
+    `;
+
   const html = `
     <div class="text-start">
       <div class="row g-2">
@@ -457,7 +496,7 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
           <div class="fw-semibold">#${safe(o.id)}</div>
         </div>
         <div class="col-6">
-          <div class="small text-muted">Fecha</div>
+          <div class="small text-muted">Fecha de creación</div>
           <div class="fw-semibold">${safe(formatDateTime(o.date))}</div>
         </div>
 
@@ -478,6 +517,8 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
           <div class="small text-muted">Estatus de proceso</div>
           <div class="fw-semibold">${badgeHtml('process', procSt)}</div>
         </div>
+
+        ${paidAtHtml}
       </div>
 
       ${o.notes ? `
@@ -580,6 +621,7 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
           showCancelButton: true,
           confirmButtonText: 'Guardar'
         });
+
         if (!confirm.isConfirmed) return;
 
         const patch = {};
@@ -587,35 +629,25 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
         if (nextProc !== procSt) patch.process_status = nextProc;
 
         try {
-          await updateOrderPatch(o.id, patch);
-          if (typeof ctx?.onLocalUpdate === 'function') ctx.onLocalUpdate(o.id, patch);
+          const res = await updateOrderPatch(o.id, patch);
+          const updated = normalizeOrder({ ...o, ...patch, ...(res?.data || res || {}) });
+
+          if (typeof ctx?.onReload === 'function') {
+            await ctx.onReload();
+          }
+
+          if (typeof ctx?.onLocalUpdate === 'function') {
+            ctx.onLocalUpdate(o.id, updated);
+          }
+
           Swal.fire('Listo', 'Estatus actualizado.', 'success');
         } catch (err) {
           console.error(err);
-          Swal.fire('Error', 'No se pudo actualizar el estatus.', 'error');
+          Swal.fire('Error', err?.response?.data?.message || 'No se pudo actualizar el estatus.', 'error');
         }
       });
     }
   });
-}
-
-function paginationHtml(meta) {
-  if (!meta || !meta.current_page || !meta.last_page) return '';
-  const cur = Number(meta.current_page);
-  const last = Number(meta.last_page);
-
-  const prevDisabled = cur <= 1 ? 'disabled' : '';
-  const nextDisabled = cur >= last ? 'disabled' : '';
-
-  return `
-    <div class="d-flex align-items-center justify-content-between mt-3">
-      <div class="small text-muted">Página <b>${cur}</b> de <b>${last}</b> · Total: <b>${meta.total ?? '—'}</b></div>
-      <div class="btn-group">
-        <button class="btn btn-sm btn-outline-secondary" data-page="prev" ${prevDisabled}>Anterior</button>
-        <button class="btn btn-sm btn-outline-secondary" data-page="next" ${nextDisabled}>Siguiente</button>
-      </div>
-    </div>
-  `;
 }
 
 async function renderOpticaOrders(outlet) {
@@ -631,23 +663,27 @@ async function renderOpticaOrders(outlet) {
   const me = meRes?.data?.user || null;
   const myOpticaId = Number(me?.optica_id || 0) || null;
 
-  let page = 1;
   let rows = [];
-  let meta = null;
+  let dt = null;
 
-  async function loadPage(p) {
-    const res = await fetchOrdersPage(p);
-    rows = (res.rows || []).map(normalizeOrder);
+  async function reloadTable() {
+    const all = await fetchOrdersAll();
+    rows = all.map(normalizeOrder);
 
     if (myOpticaId) {
       rows = rows.filter(o => Number(o.opticaId) === Number(myOpticaId));
     }
 
-    meta = res.meta;
-    page = meta?.current_page ? Number(meta.current_page) : p;
-  }
+    rows.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-  await loadPage(1);
+    renderMyOrdersTbody();
+
+    if (dt) {
+      dt.destroy();
+      dt = null;
+    }
+    dt = initDataTable('#tblMyOrders');
+  }
 
   const opticaName =
     opticasById.get(String(myOpticaId))?.nombre ||
@@ -671,7 +707,7 @@ async function renderOpticaOrders(outlet) {
       }
 
       return `
-        <tr data-process="${procSt}">
+        <tr>
           <td class="fw-semibold">#${o.id}</td>
           <td class="small">${formatDateTime(o.date)}</td>
           <td>${money(o.total || 0)}</td>
@@ -688,9 +724,6 @@ async function renderOpticaOrders(outlet) {
         <td colspan="7" class="text-muted">Aún no tienes pedidos.</td>
       </tr>
     `;
-
-    const pager = outlet.querySelector('#ordersPager');
-    if (pager) pager.innerHTML = paginationHtml(meta);
   };
 
   outlet.innerHTML = `
@@ -705,25 +738,8 @@ async function renderOpticaOrders(outlet) {
     <div class="card p-3">
       <h6 class="mb-0">Mis pedidos</h6>
 
-      <div class="row g-2 mt-2">
-        <div class="col-7">
-          <input class="form-control form-control-sm" id="orderSearch" placeholder="Buscar #, pago, estatus...">
-        </div>
-        <div class="col-5">
-          <select class="form-select form-select-sm" id="orderProcess">
-            <option value="">Proceso (todos)</option>
-            <option value="en_proceso">En proceso</option>
-            <option value="listo_para_entregar">Listo para entregar</option>
-            <option value="entregado">Entregado</option>
-            <option value="revision">Revisión</option>
-            <option value="en_preparacion">En preparación</option>
-            <option value="cancelado">Cancelado</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="table-responsive mt-2">
-        <table class="table table-sm align-middle" id="tblMyOrders">
+      <div class="table-responsive mt-3">
+        <table class="table table-sm align-middle" id="tblMyOrders" style="width:100%">
           <thead>
             <tr>
               <th>#</th>
@@ -738,10 +754,6 @@ async function renderOpticaOrders(outlet) {
           <tbody></tbody>
         </table>
       </div>
-
-      <div id="ordersPager"></div>
-
-      <div class="small text-muted">Tip: usa el buscador o filtra por proceso.</div>
     </div>
   `;
 
@@ -749,23 +761,7 @@ async function renderOpticaOrders(outlet) {
     location.hash = '#/pos';
   });
 
-  renderMyOrdersTbody();
-
-  const applyOrderFilter = () => {
-    const q = (outlet.querySelector('#orderSearch')?.value || '').toLowerCase().trim();
-    const proc = outlet.querySelector('#orderProcess')?.value || '';
-    const trs = Array.from(outlet.querySelectorAll('#tblMyOrders tbody tr'));
-
-    trs.forEach(r => {
-      const txt = r.innerText.toLowerCase();
-      const okQ = !q || txt.includes(q);
-      const okP = !proc || (r.dataset.process === proc);
-      r.style.display = (okQ && okP) ? '' : 'none';
-    });
-  };
-
-  outlet.querySelector('#orderSearch')?.addEventListener('input', applyOrderFilter);
-  outlet.querySelector('#orderProcess')?.addEventListener('change', applyOrderFilter);
+  await reloadTable();
 
   outlet.addEventListener('click', async (e) => {
     const id = e.target?.dataset?.viewOrder;
@@ -774,29 +770,11 @@ async function renderOpticaOrders(outlet) {
     const o = rows.find(x => String(x.id) === String(id));
     if (!o) return;
 
-    await showOrderDetail(o, productsMap, opticasById, { role: 'optica' });
+    await showOrderDetail(o, productsMap, opticasById, {
+      role: 'optica',
+      onReload: reloadTable
+    });
   });
-
-  outlet.addEventListener('click', async (e) => {
-    const btn = e.target?.closest('[data-page]');
-    if (!btn) return;
-
-    const dir = btn.dataset.page;
-    const cur = Number(meta?.current_page || page);
-    const last = Number(meta?.last_page || cur);
-
-    let next = cur;
-    if (dir === 'prev') next = Math.max(1, cur - 1);
-    if (dir === 'next') next = Math.min(last, cur + 1);
-
-    if (next === cur) return;
-
-    await loadPage(next);
-    renderMyOrdersTbody();
-    applyOrderFilter();
-  });
-
-  applyOrderFilter();
 }
 
 async function renderEmployeeOrders(outlet) {
@@ -810,25 +788,34 @@ async function renderEmployeeOrders(outlet) {
   const productsMap = buildProductMap(products);
   const opticasById = optRes.byId;
 
-  let page = 1;
   let rows = [];
-  let meta = null;
+  let dt = null;
 
-  async function loadPage(p) {
-    const res = await fetchOrdersPage(p);
-    rows = (res.rows || []).map(normalizeOrder).sort((a, b) => new Date(b.date) - new Date(a.date));
-    meta = res.meta;
-    page = meta?.current_page ? Number(meta.current_page) : p;
+  async function reloadTable() {
+    const all = await fetchOrdersAll();
+    rows = all.map(normalizeOrder).sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    renderTbody();
+
+    if (dt) {
+      dt.destroy();
+      dt = null;
+    }
+    dt = initDataTable('#tblAllOrders');
   }
 
-  await loadPage(1);
-
-  const onLocalUpdate = (orderId, patch) => {
+  const onLocalUpdate = (orderId, updatedOrder) => {
     const idx = rows.findIndex(x => String(x.id) === String(orderId));
     if (idx >= 0) {
-      rows[idx] = normalizeOrder({ ...rows[idx], ...patch });
+      rows[idx] = normalizeOrder(updatedOrder);
     }
     renderTbody();
+
+    if (dt) {
+      dt.destroy();
+      dt = null;
+    }
+    dt = initDataTable('#tblAllOrders');
   };
 
   function pmLabelFrom(o) {
@@ -867,9 +854,6 @@ async function renderEmployeeOrders(outlet) {
         <td colspan="8" class="text-muted">No hay pedidos.</td>
       </tr>
     `;
-
-    const pager = outlet.querySelector('#ordersPagerAll');
-    if (pager) pager.innerHTML = paginationHtml(meta);
   }
 
   outlet.innerHTML = `
@@ -898,41 +882,23 @@ async function renderEmployeeOrders(outlet) {
           <tbody></tbody>
         </table>
       </div>
-
-      <div id="ordersPagerAll"></div>
-
-      <div class="small text-muted mt-2">
-        Tip: usa Ctrl+F o agrega un buscador si quieres filtro por texto.
-      </div>
     </div>
   `;
 
-  renderTbody();
+  await reloadTable();
 
   outlet.addEventListener('click', async (e) => {
     const id = e.target?.dataset?.viewOrder;
-    if (id) {
-      const o = rows.find(x => String(x.id) === String(id));
-      if (!o) return;
-      await showOrderDetail(o, productsMap, opticasById, { role, onLocalUpdate });
-      return;
-    }
+    if (!id) return;
 
-    const btn = e.target?.closest('[data-page]');
-    if (!btn) return;
+    const o = rows.find(x => String(x.id) === String(id));
+    if (!o) return;
 
-    const dir = btn.dataset.page;
-    const cur = Number(meta?.current_page || page);
-    const last = Number(meta?.last_page || cur);
-
-    let next = cur;
-    if (dir === 'prev') next = Math.max(1, cur - 1);
-    if (dir === 'next') next = Math.min(last, cur + 1);
-
-    if (next === cur) return;
-
-    await loadPage(next);
-    renderTbody();
+    await showOrderDetail(o, productsMap, opticasById, {
+      role,
+      onLocalUpdate,
+      onReload: reloadTable
+    });
   });
 }
 

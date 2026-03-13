@@ -1,10 +1,5 @@
-// public/assets/js/pages/pos.js (FULL - UPDATED)
-// - Recarga products + inventory + categories después de crear pedido
-// - ÓPTICA crea pedidos: POST /orders
-// - Micas permiten múltiples tratamientos
-// - Evita fusionar líneas de la misma mica con tratamientos distintos
-// - Soporta categorías por category/category_code/category_name/category_id
-// - Stock mostrado y validado por "available" (stock - reserved)
+// public/assets/js/pages/pos.js
+// FULL - actualizado para imágenes protegidas y imageUrl absoluta/relativa
 
 import { api } from '../services/api.js';
 import { money } from '../utils/helpers.js';
@@ -281,6 +276,11 @@ export async function renderPOS(outlet) {
     }
 
     buildStockMaps();
+    DBG('products loaded', products.map(p => ({
+      id: p.id,
+      name: p.name,
+      imageUrl: p.imageUrl
+    })));
   }
 
   async function loadCustomersIfNeeded() {
@@ -316,8 +316,10 @@ export async function renderPOS(outlet) {
   await loadCore();
   await Promise.all([loadCustomersIfNeeded(), loadOpticaUserContextIfNeeded()]);
 
-  async function getProtectedImageUrl(productId) {
-    const pid = Number(productId);
+  async function getProtectedImageUrl(product) {
+    const pid = Number(product?.id || 0);
+    if (!pid) return PLACEHOLDER_IMG;
+
     if (imageUrlCache.has(pid)) return imageUrlCache.get(pid);
 
     if (!token) {
@@ -325,14 +327,25 @@ export async function renderPOS(outlet) {
       return PLACEHOLDER_IMG;
     }
 
+    const endpoint = product?.imageUrl || `/products/${pid}/image`;
+
     try {
-      const blob = await api.getBlob(`/products/${pid}/image`);
-      if (!blob || blob.size === 0) throw new Error('Empty image');
+      const blob = await api.getBlob(endpoint);
+
+      if (!blob || blob.size === 0) {
+        throw new Error('Empty image blob');
+      }
 
       const url = URL.createObjectURL(blob);
       imageUrlCache.set(pid, url);
       return url;
     } catch (e) {
+      console.error('POS image error', {
+        productId: pid,
+        endpoint,
+        error: e?.message || e
+      });
+
       imageUrlCache.set(pid, PLACEHOLDER_IMG);
       return PLACEHOLDER_IMG;
     }
@@ -343,7 +356,8 @@ export async function renderPOS(outlet) {
     const tasks = [];
 
     for (const img of imgs) {
-      const pid = img.dataset.imgpid;
+      const pid = Number(img.dataset.imgpid || 0);
+      const product = products.find(p => Number(p.id) === pid);
 
       img.onerror = () => {
         img.onerror = null;
@@ -351,7 +365,7 @@ export async function renderPOS(outlet) {
       };
 
       tasks.push((async () => {
-        const url = await getProtectedImageUrl(pid);
+        const url = await getProtectedImageUrl(product);
         img.src = url || PLACEHOLDER_IMG;
       })());
     }
@@ -681,6 +695,7 @@ export async function renderPOS(outlet) {
     const g = p.graduation || null;
     const b = p.bisel || null;
     const catCode = getProductCategoryCode(p);
+    const imgUrl = await getProtectedImageUrl(p);
 
     const graduacionHtml =
       (catCode === 'MICAS' || catCode === 'LENTES CONTACTO')
@@ -698,8 +713,6 @@ export async function renderPOS(outlet) {
         <div class="fw-semibold">${money(p.buyPrice ?? p.buy_price ?? 0)}</div>
       </div>
     `;
-
-    const imgUrl = imageUrlCache.get(Number(p.id)) || PLACEHOLDER_IMG;
 
     const html = `
       <div class="text-start">
@@ -913,17 +926,6 @@ export async function renderPOS(outlet) {
   }
 
   const addToCart = async (p) => {
-    console.log('ADD TO CART', {
-      id: p?.id,
-      name: p?.name,
-      isOptica,
-      category: p?.category,
-      category_name: p?.category_name,
-      category_code: p?.category_code,
-      category_id: p?.category_id,
-      isMica: isMicaProduct(p)
-    });
-
     const available = getAvailable(p.id);
     if (available <= 0) {
       warnNoStock(p.name);
@@ -933,12 +935,9 @@ export async function renderPOS(outlet) {
     let selectedTreatments = [];
 
     if (isOptica && isMicaProduct(p)) {
-      console.log('ABRIENDO FORMULARIO DE TRATAMIENTOS PARA MICA');
-
       const picked = await selectTreatmentsForProduct(p);
 
       if (picked === null) {
-        console.log('USUARIO CANCELÓ TRATAMIENTOS');
         return false;
       }
 

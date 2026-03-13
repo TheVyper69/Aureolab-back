@@ -1,15 +1,12 @@
 // public/assets/js/pages/inventory.js
 // INVENTORY (FULL)
 // - Modal crea/edita productos con payload NUEVO (FKs + sphere/cylinder)
-// - treatment NO se captura aquí (lo elige la óptica en el pedido y puede ser múltiple)
+// - Usa selects para: Type, Material, Supplier, Box
+// - Soporta imagen con preview a la derecha
 // - Muestra/oculta campos según categoría (MICAS / LENTES_CONTACTO / otros)
-// - Guarda con JSON payload (NO FormData)
-//
-// Requiere:
-// - inventoryService.js (list, listCategories, deleteProduct, addStock, etc.)
-// - api.js (para POST/PUT productos con JSON)
-// - authService.js
-// - Swal, bootstrap.Modal, jQuery + DataTables
+// - Guarda con FormData
+// - Al editar, consulta /products/{id}
+// - La preview usa blob protegido con token
 
 import { inventoryService } from '../services/inventoryService.js';
 import { authService } from '../services/authService.js';
@@ -19,70 +16,120 @@ import { money } from '../utils/helpers.js';
 /* =========================
  * Helpers
  * ========================= */
-function safe(v){
+function safe(v) {
   return String(v ?? '')
-    .replaceAll('&','&amp;')
-    .replaceAll('<','&lt;')
-    .replaceAll('>','&gt;')
-    .replaceAll('"','&quot;');
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
 }
 
-function pickCategoryName(c){
+function pickCategoryName(c) {
   return c?.name ?? c?.label ?? c?.title ?? '';
 }
 
-function pickCategoryCode(c){
+function pickCategoryCode(c) {
   return String(c?.code ?? c?.slug ?? '').trim();
 }
 
-function mountDataTable(selector){
-  if(!(window.$ && $.fn.dataTable)) return null;
+function buildOptions(arr, placeholder = '-- Selecciona --', labelFn = (x) => x.name, valueKey = 'id') {
+  const list = Array.isArray(arr) ? arr : [];
+  return `
+    <option value="">${safe(placeholder)}</option>
+    ${list.map(item => `
+      <option value="${safe(item?.[valueKey])}">
+        ${safe(labelFn(item))}
+      </option>
+    `).join('')}
+  `;
+}
 
-  if($.fn.DataTable.isDataTable(selector)){
+function mountDataTable(selector) {
+  if (!(window.$ && $.fn.dataTable)) return null;
+
+  if ($.fn.DataTable.isDataTable(selector)) {
     $(selector).DataTable().destroy();
   }
 
   return $(selector).DataTable({
     pageLength: 10,
     language: {
-      search: "Buscar:",
-      lengthMenu: "Mostrar _MENU_",
-      info: "Mostrando _START_ a _END_ de _TOTAL_",
-      paginate: { previous: "Anterior", next: "Siguiente" },
-      zeroRecords: "No hay registros"
+      search: 'Buscar:',
+      lengthMenu: 'Mostrar _MENU_',
+      info: 'Mostrando _START_ a _END_ de _TOTAL_',
+      paginate: { previous: 'Anterior', next: 'Siguiente' },
+      zeroRecords: 'No hay registros'
     }
   });
 }
 
-function extractAxiosErrorMessage(err){
+function extractAxiosErrorMessage(err) {
   const status = err?.response?.status;
   const data = err?.response?.data;
 
-  if(status === 422 && data?.errors){
+  if (status === 422 && data?.errors) {
     const lines = [];
-    for(const k of Object.keys(data.errors)){
+    for (const k of Object.keys(data.errors)) {
       const arr = data.errors[k] || [];
-      for(const msg of arr){
+      for (const msg of arr) {
         lines.push(`• ${msg}`);
       }
     }
     return lines.length ? lines.join('<br>') : (data.message || 'Error de validación');
   }
-  return data?.message || err?.message || 'Ocurrió un error';
+
+  return data?.message || data?.error || err?.message || 'Ocurrió un error';
+}
+
+function setImagePreview(src) {
+  const wrap = document.getElementById('imagePreviewWrap');
+  const img = document.getElementById('imagePreview');
+  const empty = document.getElementById('imagePreviewEmpty');
+
+  if (!wrap || !img || !empty) return;
+
+  if (src) {
+    img.src = src;
+    img.classList.remove('d-none');
+    empty.classList.add('d-none');
+  } else {
+    img.removeAttribute('src');
+    img.classList.add('d-none');
+    empty.classList.remove('d-none');
+  }
+}
+
+function readImagePreview(file) {
+  if (!file) {
+    setImagePreview(null);
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    setImagePreview(e.target?.result || null);
+  };
+  reader.readAsDataURL(file);
+}
+
+function appendIfNotNull(formData, key, value) {
+  if (value !== null && value !== undefined && value !== '') {
+    formData.append(key, value);
+  }
 }
 
 /* =========================
  * Normalización INVENTARIO
  * Soporta wrapper: [{ stock,reserved,available, product:{...}}]
  * ========================= */
-function normalizeInventoryRows(rows){
+function normalizeInventoryRows(rows) {
   const arr = Array.isArray(rows) ? rows : [];
   const isWrapped = arr.length && arr[0] && typeof arr[0] === 'object'
     && Object.prototype.hasOwnProperty.call(arr[0], 'product');
 
-  if(!isWrapped) return [];
+  if (!isWrapped) return [];
 
-  return arr.map(r=>{
+  return arr.map(r => {
     const p = r.product || {};
     return {
       stock: Number(r.stock ?? 0),
@@ -112,11 +159,10 @@ function normalizeInventoryRows(rows){
         lens_type_id: p.lens_type_id ?? null,
         material_id: p.material_id ?? null,
 
-        // treatment_id existe en DB pero ya NO se captura en inventario
-        // treatment_id: p.treatment_id ?? null,
-
         sphere: (p.sphere ?? null),
         cylinder: (p.cylinder ?? null),
+
+        imageUrl: p.imageUrl ?? p.image_url ?? null,
       }
     };
   });
@@ -125,7 +171,7 @@ function normalizeInventoryRows(rows){
 /* =========================
  * Main render
  * ========================= */
-export async function renderInventory(outlet){
+export async function renderInventory(outlet) {
   const role = authService.getRole();
   const token = authService.getToken();
   const canEdit = (role === 'admin') && !!token;
@@ -136,7 +182,40 @@ export async function renderInventory(outlet){
   let categories = [];
   let inventoryRows = [];
 
+  let lensTypes = [];
+  let materials = [];
+  let suppliers = [];
+  let boxes = [];
+
   let productModal = null;
+  let previewObjectUrl = null;
+
+  async function loadProtectedPreview(productId) {
+    if (!productId) {
+      setImagePreview(null);
+      return;
+    }
+
+    try {
+      const blob = await inventoryService.getProductImageBlob(productId);
+
+      if (!blob || blob.size === 0) {
+        setImagePreview(null);
+        return;
+      }
+
+      if (previewObjectUrl) {
+        URL.revokeObjectURL(previewObjectUrl);
+        previewObjectUrl = null;
+      }
+
+      previewObjectUrl = URL.createObjectURL(blob);
+      setImagePreview(previewObjectUrl);
+    } catch (err) {
+      console.error('No se pudo cargar preview protegida:', err);
+      setImagePreview(null);
+    }
+  }
 
   const renderShell = () => {
     outlet.innerHTML = `
@@ -161,14 +240,14 @@ export async function renderInventory(outlet){
 
   const renderTopActions = () => {
     const box = outlet.querySelector('#topActions');
-    if(!box) return;
+    if (!box) return;
 
-    if(view === 'inventory'){
+    if (view === 'inventory') {
       box.innerHTML = `
         <button class="btn btn-outline-brand" id="btnRefresh">Actualizar</button>
         <button class="btn btn-brand" id="btnNewProduct">Nuevo producto</button>
       `;
-    }else{
+    } else {
       box.innerHTML = `
         <button class="btn btn-outline-brand" id="btnRefresh">Actualizar</button>
         <button class="btn btn-brand" id="btnNewCategory">Nueva categoría</button>
@@ -176,18 +255,41 @@ export async function renderInventory(outlet){
     }
   };
 
-  /* ---------- Product Modal HTML ---------- */
   const renderProductModalHtml = () => {
-    const options = (categories || []).map(c=>{
+    const categoryOptions = (categories || []).map(c => {
       const id = c.id ?? '';
       const code = pickCategoryCode(c);
       const name = pickCategoryName(c) || `Categoría #${id}`;
       return `<option value="${safe(id)}">${safe(name)} (${safe(code)})</option>`;
     }).join('');
 
+    const lensTypeOptions = buildOptions(
+      lensTypes,
+      '-- Selecciona type --',
+      (x) => `${x.name}${x.code ? ` (${x.code})` : ''}`
+    );
+
+    const materialOptions = buildOptions(
+      materials,
+      '-- Selecciona material --',
+      (x) => x.name
+    );
+
+    const supplierOptions = buildOptions(
+      suppliers,
+      '-- Selecciona supplier --',
+      (x) => x.name
+    );
+
+    const boxOptions = buildOptions(
+      boxes,
+      '-- Selecciona box --',
+      (x) => `${x.name}${x.code ? ` (${x.code})` : ''}`
+    );
+
     return `
       <div class="modal fade" id="productModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
           <div class="modal-content">
 
             <div class="modal-header">
@@ -213,9 +315,8 @@ export async function renderInventory(outlet){
                     <label class="form-label">Categoría</label>
                     <select class="form-select" id="category_id" required>
                       <option value="">-- Selecciona --</option>
-                      ${options}
+                      ${categoryOptions}
                     </select>
-                    <div class="form-text">Manda <b>category_id</b>.</div>
                   </div>
 
                   <div class="col-md-6">
@@ -243,66 +344,88 @@ export async function renderInventory(outlet){
                     <input type="number" class="form-control" id="maxStock" min="0">
                   </div>
 
-                  <!-- LEGACY -->
-                  <div class="col-md-6">
-                    <label class="form-label">Type (legacy)</label>
-                    <input class="form-control" id="type" placeholder="Ej: monofocal">
-                  </div>
-
-                  <div class="col-md-6">
-                    <label class="form-label">Material (legacy)</label>
-                    <input class="form-control" id="material" placeholder="Ej: legacy-cr39">
-                  </div>
-
-                  <hr class="my-2"/>
-
-                  <!-- FKs base (siempre visibles) -->
-                  <div class="col-md-6">
-                    <label class="form-label">supplier_id</label>
-                    <input type="number" class="form-control" id="supplier_id" min="1" placeholder="Ej: 1">
-                  </div>
-
-                  <div class="col-md-6">
-                    <label class="form-label">box_id</label>
-                    <input type="number" class="form-control" id="box_id" min="1" placeholder="Ej: 1">
-                  </div>
-
-                  <!-- Sección MICAS / LENTES_CONTACTO -->
                   <div id="lensSection" class="d-none">
+                    <hr class="my-2">
                     <div class="row g-3 mt-0">
+
                       <div class="col-md-6">
-                        <label class="form-label">lens_type_id</label>
-                        <input type="number" class="form-control" id="lens_type_id" min="1" placeholder="Ej: 1">
+                        <label class="form-label">Type</label>
+                        <select class="form-select" id="lens_type_id">
+                          ${lensTypeOptions}
+                        </select>
                       </div>
 
                       <div class="col-md-6">
-                        <label class="form-label">material_id</label>
-                        <input type="number" class="form-control" id="material_id" min="1" placeholder="Ej: 1">
+                        <label class="form-label">Material</label>
+                        <select class="form-select" id="material_id">
+                          ${materialOptions}
+                        </select>
                       </div>
 
-                      <!-- SOLO MICAS: esfera/cilindro -->
-                      <div id="micasPowerSection" class="d-none">
-                        <div class="row g-3 mt-0">
-                          <div class="col-md-6">
-                            <label class="form-label">sphere (SKU fijo)</label>
-                            <input type="number" class="form-control" id="sphere" step="0.25" placeholder="Ej: -2.00">
-                            <div class="form-text">Trigger controla rango (-40 a 40).</div>
-                          </div>
+                      <div class="col-md-6">
+                        <label class="form-label">Supplier</label>
+                        <select class="form-select" id="supplier_id">
+                          ${supplierOptions}
+                        </select>
+                      </div>
 
-                          <div class="col-md-6">
-                            <label class="form-label">cylinder (≤ 0)</label>
-                            <input type="number" class="form-control" id="cylinder" step="0.25" max="0" placeholder="Ej: -0.50">
-                            <div class="form-text">Si pones positivo, el trigger revienta.</div>
-                          </div>
-                        </div>
+                      <div class="col-md-6">
+                        <label class="form-label">Box</label>
+                        <select class="form-select" id="box_id">
+                          ${boxOptions}
+                        </select>
+                      </div>
+
+                      <div class="col-md-6">
+                        <label class="form-label">Esfera</label>
+                        <input type="number" class="form-control" id="sphere" step="0.25" min="-40" max="40" placeholder="Ej: -2.00 o 1.25">
+                      </div>
+
+                      <div class="col-md-6">
+                        <label class="form-label">Cilindro</label>
+                        <input type="number" class="form-control" id="cylinder" step="0.25" max="0" placeholder="Ej: -0.50">
                       </div>
 
                       <div class="col-12">
                         <div class="small text-muted">
-                          Tratamientos: NO se capturan aquí. Los define la óptica en el pedido (y pueden ser varios).
+                          Type, Material, Supplier, Box, Esfera y Cilindro solo aplican para MICAS y LENTES_CONTACTO.
                         </div>
                       </div>
 
+                    </div>
+                  </div>
+
+                  <div class="col-12">
+                    <hr class="my-2">
+                    <div class="row g-3 align-items-start">
+                      <div class="col-md-8">
+                        <label class="form-label">Imagen del producto</label>
+                        <input type="file" class="form-control" id="image" accept="image/*">
+                        <div class="form-text">Selecciona una imagen para el producto.</div>
+                      </div>
+
+                      <div class="col-md-4">
+                        <label class="form-label d-block">Vista previa</label>
+                        <div
+                          id="imagePreviewWrap"
+                          class="border rounded p-2 text-center bg-light"
+                          style="max-width: 220px;"
+                        >
+                          <div
+                            id="imagePreviewEmpty"
+                            class="text-muted small d-flex align-items-center justify-content-center"
+                            style="height: 120px;"
+                          >
+                            Sin imagen seleccionada
+                          </div>
+                          <img
+                            id="imagePreview"
+                            class="img-fluid rounded d-none mx-auto"
+                            alt="Vista previa"
+                            style="max-height: 120px; max-width: 100%; object-fit: contain;"
+                          >
+                        </div>
+                      </div>
                     </div>
                   </div>
 
@@ -323,7 +446,6 @@ export async function renderInventory(outlet){
     `;
   };
 
-  /* ---------- Tables Render ---------- */
   const renderInventoryTable = () => {
     const content = outlet.querySelector('#invContent');
 
@@ -344,7 +466,7 @@ export async function renderInventory(outlet){
               </tr>
             </thead>
             <tbody>
-              ${inventoryRows.map(r=>{
+              ${inventoryRows.map(r => {
                 const p = r.product || {};
                 const available = Number(r.available ?? 0);
                 const min = Number(p.minStock ?? 0);
@@ -386,9 +508,17 @@ export async function renderInventory(outlet){
 
     mountDataTable('#tblInventory');
 
-    if(canEdit){
+    if (canEdit) {
       productModal = new bootstrap.Modal(document.getElementById('productModal'));
       wireProductModalHandlers();
+
+      document.getElementById('productModal')?.addEventListener('hidden.bs.modal', () => {
+        if (previewObjectUrl) {
+          URL.revokeObjectURL(previewObjectUrl);
+          previewObjectUrl = null;
+        }
+        setImagePreview(null);
+      });
     }
   };
 
@@ -409,7 +539,7 @@ export async function renderInventory(outlet){
               </tr>
             </thead>
             <tbody>
-              ${(categories || []).map(c=>{
+              ${(categories || []).map(c => {
                 const id = c.id ?? '';
                 const code = pickCategoryCode(c);
                 const name = pickCategoryName(c);
@@ -442,42 +572,28 @@ export async function renderInventory(outlet){
     mountDataTable('#tblCategories');
   };
 
-  /* ---------- Lens section toggle ---------- */
-  function toggleLensSection(){
+  function toggleLensSection() {
     const catId = document.getElementById('category_id')?.value || '';
     const cat = (categories || []).find(x => String(x.id) === String(catId));
     const code = pickCategoryCode(cat);
 
     const lensSection = document.getElementById('lensSection');
-    const micasPowerSection = document.getElementById('micasPowerSection');
-    if(!lensSection || !micasPowerSection) return;
+    if (!lensSection) return;
 
     const isMicas = (code === 'MICAS');
     const isContacts = (code === 'LENTES_CONTACTO');
     const isLens = isMicas || isContacts;
 
     lensSection.classList.toggle('d-none', !isLens);
-    micasPowerSection.classList.toggle('d-none', !isMicas);
 
-    // Si NO es lens, limpiamos todo
-    if(!isLens){
-      ['lens_type_id','material_id','sphere','cylinder'].forEach(id=>{
+    if (!isLens) {
+      ['lens_type_id', 'material_id', 'supplier_id', 'box_id', 'sphere', 'cylinder'].forEach(id => {
         const el = document.getElementById(id);
-        if(el) el.value = '';
-      });
-      return;
-    }
-
-    // Si es LENTES_CONTACTO, limpia sphere/cylinder (no aplica fijo por SKU normalmente)
-    if(isContacts){
-      ['sphere','cylinder'].forEach(id=>{
-        const el = document.getElementById(id);
-        if(el) el.value = '';
+        if (el) el.value = '';
       });
     }
   }
 
-  /* ---------- Product Modal Logic ---------- */
   const openProductModal = async (productOrNull) => {
     const p = productOrNull || null;
 
@@ -488,30 +604,34 @@ export async function renderInventory(outlet){
     document.getElementById('name').value = p?.name ?? '';
     document.getElementById('description').value = p?.description ?? '';
 
-    document.getElementById('buyPrice').value = (p?.buyPrice ?? '');
-    document.getElementById('salePrice').value = (p?.salePrice ?? '');
-    document.getElementById('minStock').value = (p?.minStock ?? '');
-    document.getElementById('maxStock').value = (p?.maxStock ?? '');
-
-    document.getElementById('type').value = (p?.type ?? '');
-    document.getElementById('material').value = (p?.material ?? '');
+    document.getElementById('buyPrice').value = (p?.buyPrice ?? p?.buy_price ?? '');
+    document.getElementById('salePrice').value = (p?.salePrice ?? p?.sale_price ?? '');
+    document.getElementById('minStock').value = (p?.minStock ?? p?.min_stock ?? '');
+    document.getElementById('maxStock').value = (p?.maxStock ?? p?.max_stock ?? '');
 
     document.getElementById('supplier_id').value = (p?.supplier_id ?? '');
     document.getElementById('box_id').value = (p?.box_id ?? '');
-
     document.getElementById('lens_type_id').value = (p?.lens_type_id ?? '');
     document.getElementById('material_id').value = (p?.material_id ?? '');
-
     document.getElementById('sphere').value = (p?.sphere ?? '');
     document.getElementById('cylinder').value = (p?.cylinder ?? '');
 
-    // category_id select
     const sel = document.getElementById('category_id');
-    sel.value = (p?.categoryId ?? '');
+    sel.value = (p?.categoryId ?? p?.category_id ?? '');
+
+    const imageInput = document.getElementById('image');
+    if (imageInput) {
+      imageInput.value = '';
+    }
+
+    setImagePreview(null);
 
     toggleLensSection();
-
     productModal.show();
+
+    if (p?.id) {
+      await loadProtectedPreview(p.id);
+    }
   };
 
   const wireProductModalHandlers = () => {
@@ -519,70 +639,83 @@ export async function renderInventory(outlet){
 
     document.getElementById('category_id')?.addEventListener('change', toggleLensSection);
 
-    btnSave?.addEventListener('click', async ()=>{
+    document.getElementById('image')?.addEventListener('change', (e) => {
+      const file = e.target?.files?.[0] || null;
+      readImagePreview(file);
+    });
+
+    btnSave?.addEventListener('click', async () => {
       const id = document.getElementById('productId').value || '';
 
       const sku = document.getElementById('sku').value.trim();
       const name = document.getElementById('name').value.trim();
       const category_id = Number(document.getElementById('category_id').value || 0);
 
-      if(!sku || !name || !category_id){
-        Swal.fire('Faltan datos','SKU, Nombre y Categoría son obligatorios.','info');
+      if (!sku || !name || !category_id) {
+        Swal.fire('Faltan datos', 'SKU, Nombre y Categoría son obligatorios.', 'info');
         return;
       }
 
-      const payload = {
-        sku,
-        name,
-        description: (document.getElementById('description').value || '').trim() || null,
-        category_id,
+      const supplier_id = (document.getElementById('supplier_id').value === '' ? null : Number(document.getElementById('supplier_id').value));
+      const box_id = (document.getElementById('box_id').value === '' ? null : Number(document.getElementById('box_id').value));
+      const lens_type_id = (document.getElementById('lens_type_id').value === '' ? null : Number(document.getElementById('lens_type_id').value));
+      const material_id = (document.getElementById('material_id').value === '' ? null : Number(document.getElementById('material_id').value));
+      const sphere = (document.getElementById('sphere').value === '' ? null : Number(document.getElementById('sphere').value));
+      const cylinder = (document.getElementById('cylinder').value === '' ? null : Number(document.getElementById('cylinder').value));
 
-        type: (document.getElementById('type').value || '').trim() || null,
-        material: (document.getElementById('material').value || '').trim() || null,
-
-        buyPrice: Number(document.getElementById('buyPrice').value || 0),
-        salePrice: Number(document.getElementById('salePrice').value || 0),
-        minStock: Number(document.getElementById('minStock').value || 0),
-        maxStock: (document.getElementById('maxStock').value === '' ? null : Number(document.getElementById('maxStock').value)),
-
-        supplier_id: (document.getElementById('supplier_id').value === '' ? null : Number(document.getElementById('supplier_id').value)),
-        box_id: (document.getElementById('box_id').value === '' ? null : Number(document.getElementById('box_id').value)),
-        lens_type_id: (document.getElementById('lens_type_id').value === '' ? null : Number(document.getElementById('lens_type_id').value)),
-        material_id: (document.getElementById('material_id').value === '' ? null : Number(document.getElementById('material_id').value)),
-
-        // Tratamiento ya NO va en producto:
-        // treatment_id: ...
-
-        sphere: (document.getElementById('sphere').value === '' ? null : Number(document.getElementById('sphere').value)),
-        cylinder: (document.getElementById('cylinder').value === '' ? null : Number(document.getElementById('cylinder').value)),
-      };
-
-      // Validación rápida cliente (evita triggers)
-      if(payload.cylinder !== null && payload.cylinder > 0){
-        Swal.fire('Dato inválido','cylinder debe ser <= 0','warning');
+      if (cylinder !== null && cylinder > 0) {
+        Swal.fire('Dato inválido', 'cylinder debe ser <= 0', 'warning');
         return;
       }
 
-      try{
-        if(id){
-          await api.put(`/products/${id}`, payload);
-        }else{
-          await api.post('/products', payload);
+      if (sphere !== null && (sphere < -40 || sphere > 40)) {
+        Swal.fire('Dato inválido', 'sphere debe estar entre -40 y 40', 'warning');
+        return;
+      }
+
+      const imageFile = document.getElementById('image')?.files?.[0] || null;
+
+      const formData = new FormData();
+      formData.append('sku', sku);
+      formData.append('name', name);
+      formData.append('category_id', String(category_id));
+
+      appendIfNotNull(formData, 'description', (document.getElementById('description').value || '').trim() || null);
+      appendIfNotNull(formData, 'buyPrice', document.getElementById('buyPrice').value || 0);
+      appendIfNotNull(formData, 'salePrice', document.getElementById('salePrice').value || 0);
+      appendIfNotNull(formData, 'minStock', document.getElementById('minStock').value || 0);
+      appendIfNotNull(formData, 'maxStock', document.getElementById('maxStock').value === '' ? null : document.getElementById('maxStock').value);
+
+      appendIfNotNull(formData, 'supplier_id', supplier_id);
+      appendIfNotNull(formData, 'box_id', box_id);
+      appendIfNotNull(formData, 'lens_type_id', lens_type_id);
+      appendIfNotNull(formData, 'material_id', material_id);
+      appendIfNotNull(formData, 'sphere', sphere);
+      appendIfNotNull(formData, 'cylinder', cylinder);
+
+      if (imageFile) {
+        formData.append('image', imageFile);
+      }
+
+      try {
+        if (id) {
+          await inventoryService.updateProduct(id, formData);
+        } else {
+          await inventoryService.createProduct(formData);
         }
 
         productModal.hide();
-        Swal.fire('Guardado','Producto guardado.','success');
+        Swal.fire('Guardado', 'Producto guardado.', 'success');
         await refresh('inventory');
-      }catch(err){
+      } catch (err) {
         console.error(err);
         Swal.fire('Error', extractAxiosErrorMessage(err), 'error');
       }
     });
   };
 
-  /* ---------- Category CRUD (igual) ---------- */
   const openCreateCategory = async () => {
-    if(!canEdit) return;
+    if (!canEdit) return;
 
     const r = await Swal.fire({
       title: 'Nueva categoría',
@@ -599,11 +732,11 @@ export async function renderInventory(outlet){
       focusConfirm: false,
       showCancelButton: true,
       confirmButtonText: 'Guardar',
-      preConfirm: ()=>{
+      preConfirm: () => {
         const code = document.getElementById('swCatCode')?.value?.trim() || '';
         const name = document.getElementById('swCatName')?.value?.trim() || '';
         const description = document.getElementById('swCatDesc')?.value?.trim() || '';
-        if(!code || !name){
+        if (!code || !name) {
           Swal.showValidationMessage('CODE y Nombre son obligatorios');
           return false;
         }
@@ -611,24 +744,24 @@ export async function renderInventory(outlet){
       }
     });
 
-    if(!r.isConfirmed) return;
+    if (!r.isConfirmed) return;
 
-    try{
+    try {
       await inventoryService.createCategory({
         code: r.value.code,
         name: r.value.name,
         description: r.value.description || null
       });
-      Swal.fire('Listo','Categoría creada.','success');
+      Swal.fire('Listo', 'Categoría creada.', 'success');
       await refresh('categories');
-    }catch(e){
+    } catch (e) {
       console.error(e);
       Swal.fire('Error', extractAxiosErrorMessage(e), 'error');
     }
   };
 
   const openEditCategory = async (catId) => {
-    if(!canEdit) return;
+    if (!canEdit) return;
 
     const cat = (categories || []).find(x => String(x.id) === String(catId));
     const currentName = pickCategoryName(cat);
@@ -650,11 +783,11 @@ export async function renderInventory(outlet){
       focusConfirm: false,
       showCancelButton: true,
       confirmButtonText: 'Guardar',
-      preConfirm: ()=>{
+      preConfirm: () => {
         const code = document.getElementById('swCatCode')?.value?.trim() || '';
         const name = document.getElementById('swCatName')?.value?.trim() || '';
         const description = document.getElementById('swCatDesc')?.value?.trim() || '';
-        if(!code || !name){
+        if (!code || !name) {
           Swal.showValidationMessage('CODE y Nombre son obligatorios');
           return false;
         }
@@ -662,24 +795,24 @@ export async function renderInventory(outlet){
       }
     });
 
-    if(!r.isConfirmed) return;
+    if (!r.isConfirmed) return;
 
-    try{
+    try {
       await inventoryService.updateCategory(catId, {
         code: r.value.code,
         name: r.value.name,
         description: r.value.description || null
       });
-      Swal.fire('Listo','Categoría actualizada.','success');
+      Swal.fire('Listo', 'Categoría actualizada.', 'success');
       await refresh('categories');
-    }catch(e){
+    } catch (e) {
       console.error(e);
       Swal.fire('Error', extractAxiosErrorMessage(e), 'error');
     }
   };
 
   const deleteCategory = async (catId) => {
-    if(!canEdit) return;
+    if (!canEdit) return;
 
     const r = await Swal.fire({
       title: '¿Borrar categoría?',
@@ -689,21 +822,20 @@ export async function renderInventory(outlet){
       confirmButtonText: 'Sí, borrar'
     });
 
-    if(!r.isConfirmed) return;
+    if (!r.isConfirmed) return;
 
-    try{
+    try {
       await inventoryService.deleteCategory(catId);
-      Swal.fire('Listo','Categoría eliminada.','success');
+      Swal.fire('Listo', 'Categoría eliminada.', 'success');
       await refresh('categories');
-    }catch(e){
+    } catch (e) {
       console.error(e);
       Swal.fire('Error', extractAxiosErrorMessage(e), 'error');
     }
   };
 
-  /* ---------- Inventory actions ---------- */
   const addStock = async (productId) => {
-    if(!canEdit) return;
+    if (!canEdit) return;
 
     const r = await Swal.fire({
       title: 'Aumentar stock',
@@ -713,27 +845,27 @@ export async function renderInventory(outlet){
       inputValue: 1,
       showCancelButton: true,
       confirmButtonText: 'Agregar',
-      inputValidator: (v)=>{
+      inputValidator: (v) => {
         const n = Number(v);
-        if(!Number.isInteger(n) || n <= 0) return 'Debe ser un entero mayor a 0';
+        if (!Number.isInteger(n) || n <= 0) return 'Debe ser un entero mayor a 0';
         return null;
       }
     });
 
-    if(!r.isConfirmed) return;
+    if (!r.isConfirmed) return;
 
-    try{
+    try {
       await inventoryService.addStock(productId, { qty: Number(r.value), note: 'Entrada desde inventario' });
-      Swal.fire('Listo','Stock actualizado.','success');
+      Swal.fire('Listo', 'Stock actualizado.', 'success');
       await refresh('inventory');
-    }catch(e){
+    } catch (e) {
       console.error(e);
       Swal.fire('Error', extractAxiosErrorMessage(e), 'error');
     }
   };
 
   const deleteProduct = async (productId) => {
-    if(!canEdit) return;
+    if (!canEdit) return;
 
     const r = await Swal.fire({
       title: '¿Eliminar producto?',
@@ -742,37 +874,51 @@ export async function renderInventory(outlet){
       showCancelButton: true,
       confirmButtonText: 'Sí, borrar'
     });
-    if(!r.isConfirmed) return;
 
-    try{
+    if (!r.isConfirmed) return;
+
+    try {
       await inventoryService.deleteProduct(productId);
-      Swal.fire('Listo','Producto eliminado.','success');
+      Swal.fire('Listo', 'Producto eliminado.', 'success');
       await refresh('inventory');
-    }catch(e){
+    } catch (e) {
       console.error(e);
       Swal.fire('Error', extractAxiosErrorMessage(e), 'error');
     }
   };
 
-  /* ---------- Load / Draw / Refresh ---------- */
   const loadData = async () => {
-    try{
-      const cats = await inventoryService.listCategories();
+    try {
+      const [cats, lt, mats, sups, bxs] = await Promise.all([
+        inventoryService.listCategories(),
+        api.get('/lens-types'),
+        api.get('/materials'),
+        api.get('/suppliers'),
+        api.get('/boxes'),
+      ]);
+
       categories = Array.isArray(cats) ? cats : [];
-    }catch(e){
-      console.warn('No se pudieron cargar categorías:', e);
+      lensTypes = Array.isArray(lt?.data) ? lt.data : (Array.isArray(lt) ? lt : []);
+      materials = Array.isArray(mats?.data) ? mats.data : (Array.isArray(mats) ? mats : []);
+      suppliers = Array.isArray(sups?.data) ? sups.data : (Array.isArray(sups) ? sups : []);
+      boxes = Array.isArray(bxs?.data) ? bxs.data : (Array.isArray(bxs) ? bxs : []);
+    } catch (e) {
+      console.warn('No se pudieron cargar catálogos:', e);
       categories = [];
+      lensTypes = [];
+      materials = [];
+      suppliers = [];
+      boxes = [];
     }
 
-    if(view === 'inventory'){
+    if (view === 'inventory') {
       const raw = await inventoryService.list();
       inventoryRows = normalizeInventoryRows(raw);
 
-      // resolver label por categoryId si hace falta
       const map = new Map((categories || []).map(c => [String(c.id), pickCategoryName(c)]));
-      inventoryRows = inventoryRows.map(r=>{
+      inventoryRows = inventoryRows.map(r => {
         const p = r.product || {};
-        if(!p.categoryLabel && p.categoryId && map.has(String(p.categoryId))){
+        if (!p.categoryLabel && p.categoryId && map.has(String(p.categoryId))) {
           p.categoryLabel = map.get(String(p.categoryId));
         }
         return r;
@@ -782,24 +928,24 @@ export async function renderInventory(outlet){
 
   const draw = async () => {
     renderShell();
-    if(canEdit) renderTopActions();
+    if (canEdit) renderTopActions();
 
-    outlet.querySelector('#tabInventory')?.addEventListener('click', async ()=>{ await refresh('inventory'); });
-    outlet.querySelector('#tabCategories')?.addEventListener('click', async ()=>{ await refresh('categories'); });
+    outlet.querySelector('#tabInventory')?.addEventListener('click', async () => { await refresh('inventory'); });
+    outlet.querySelector('#tabCategories')?.addEventListener('click', async () => { await refresh('categories'); });
 
-    outlet.querySelector('#btnRefresh')?.addEventListener('click', async ()=>{ await refresh(view); });
+    outlet.querySelector('#btnRefresh')?.addEventListener('click', async () => { await refresh(view); });
 
-    outlet.querySelector('#btnNewProduct')?.addEventListener('click', async ()=>{
-      if(!categories.length){
-        Swal.fire('Sin categorías','Primero crea una categoría en “Categorías”.','info');
+    outlet.querySelector('#btnNewProduct')?.addEventListener('click', async () => {
+      if (!categories.length) {
+        Swal.fire('Sin categorías', 'Primero crea una categoría en “Categorías”.', 'info');
         return;
       }
       await openProductModal(null);
     });
 
-    outlet.querySelector('#btnNewCategory')?.addEventListener('click', async ()=>{ await openCreateCategory(); });
+    outlet.querySelector('#btnNewCategory')?.addEventListener('click', async () => { await openCreateCategory(); });
 
-    if(view === 'inventory') renderInventoryTable();
+    if (view === 'inventory') renderInventoryTable();
     else renderCategoriesTable();
 
     outlet.addEventListener('click', onOutletClick);
@@ -817,33 +963,48 @@ export async function renderInventory(outlet){
     await draw();
   };
 
-  async function onOutletClick(e){
+  async function onOutletClick(e) {
     const t = e.target;
 
-    if(view === 'inventory'){
+    if (view === 'inventory') {
       const addStockId = t?.dataset?.addstock;
       const editId = t?.dataset?.edit;
       const delId = t?.dataset?.del;
 
-      if(addStockId){ await addStock(addStockId); return; }
-      if(editId){
-        const p = inventoryRows.map(r=>r.product).find(x=>String(x?.id)===String(editId));
-        if(!p){
-          Swal.fire('No encontrado','No se encontró el producto en la lista.','info');
-          return;
-        }
-        await openProductModal(p);
+      if (addStockId) {
+        await addStock(addStockId);
         return;
       }
-      if(delId){ await deleteProduct(delId); return; }
+
+      if (editId) {
+        try {
+          const fullProduct = await inventoryService.getProduct(editId);
+          await openProductModal(fullProduct);
+        } catch (err) {
+          console.error(err);
+          Swal.fire('Error', 'No se pudo cargar el producto para editar.', 'error');
+        }
+        return;
+      }
+
+      if (delId) {
+        await deleteProduct(delId);
+        return;
+      }
     }
 
-    if(view === 'categories'){
+    if (view === 'categories') {
       const catEditId = t?.dataset?.catEdit;
       const catDelId = t?.dataset?.catDel;
 
-      if(catEditId){ await openEditCategory(catEditId); return; }
-      if(catDelId){ await deleteCategory(catDelId); return; }
+      if (catEditId) {
+        await openEditCategory(catEditId);
+        return;
+      }
+      if (catDelId) {
+        await deleteCategory(catDelId);
+        return;
+      }
     }
   }
 

@@ -64,3 +64,11 @@ MODIFY COLUMN movement_type ENUM('in','out','adjustment','reserve','unreserve') 
 
 -- Lo hice en lap will
 
+ALTER TABLE products
+ADD COLUMN image_path VARCHAR(255) NULL AFTER image_mime;
+
+ALTER TABLE order_items ADD INDEX idx_product (product_id);
+
+ALTER TABLE orders
+ADD COLUMN paid_at DATETIME NULL AFTER payment_status;
+

@@ -1,56 +1,65 @@
 import { api } from '../services/api.js';
-import { money, formatDateTime } from '../utils/helpers.js';
+import { money } from '../utils/helpers.js';
 
-export async function renderSales(outlet){
-  // 1) Cargar ventas + productos (para SKU/nombre en fallback)
-  // 2) (Opcional) cargar métodos de pago
-  let sales = [];
-  let products = [];
+let salesCharts = [];
+
+function destroyCharts() {
+  for (const ch of salesCharts) {
+    try { ch.destroy(); } catch {}
+  }
+  salesCharts = [];
+}
+
+function safe(v) {
+  return String(v ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+export async function renderSales(outlet) {
+  destroyCharts();
+
+  let dashboard = {
+    orders: 0,
+    income: 0,
+    avg: 0
+  };
+
+  let byDay = [];
   let paymentMethods = [];
+  let topProducts = [];
 
   const results = await Promise.allSettled([
-    api.get('/sales'),
-    api.get('/products'),
-    api.get('/payment-methods') // si no existe, lo ignoramos
+    api.get('/reports/dashboard'),
+    api.get('/reports/orders/by-day'),
+    api.get('/reports/orders/payment-methods'),
+    api.get('/reports/orders/top-products')
   ]);
 
-  if(results[0].status === 'fulfilled') sales = results[0].value.data || [];
-  if(results[1].status === 'fulfilled') products = results[1].value.data || [];
-  if(results[2].status === 'fulfilled') paymentMethods = results[2].value.data || [];
+  if (results[0].status === 'fulfilled') {
+    const data = results[0].value?.data || {};
+    dashboard = {
+      orders: Number(data.orders || 0),
+      income: Number(data.income || 0),
+      avg: Number(data.avg || 0)
+    };
+  }
 
-  // Mapa: productId -> producto
-  const productById = new Map((products || []).map(p => [Number(p.id), p]));
+  if (results[1].status === 'fulfilled') {
+    byDay = Array.isArray(results[1].value?.data) ? results[1].value.data : [];
+  }
 
-  // Mapa: payment_method_id -> label
-  const pmById = new Map(
-    (paymentMethods || []).map(pm => [
-      Number(pm.id),
-      (pm.name ?? pm.label ?? pm.title ?? `Método #${pm.id}`)
-    ])
-  );
+  if (results[2].status === 'fulfilled') {
+    paymentMethods = Array.isArray(results[2].value?.data) ? results[2].value.data : [];
+  }
 
-  // fallback si no tienes /payment-methods
-  const pmFallback = (id)=>{
-    const n = Number(id);
-    if(n === 1) return 'Efectivo';
-    if(n === 2) return 'Tarjeta';
-    if(n === 3) return 'Transferencia';
-    return `Método #${n || ''}`.trim();
-  };
+  if (results[3].status === 'fulfilled') {
+    topProducts = Array.isArray(results[3].value?.data) ? results[3].value.data : [];
+  }
 
-  const safe = (v)=> String(v ?? '')
-    .replaceAll('&','&amp;')
-    .replaceAll('<','&lt;')
-    .replaceAll('>','&gt;')
-    .replaceAll('"','&quot;');
-
-  const pmLabel = (paymentMethodId)=>{
-    const id = Number(paymentMethodId);
-    return pmById.get(id) || pmFallback(id);
-  };
-
-  const sumTotal = (sales || []).reduce((a,s)=> a + Number(s.total || 0), 0);
-  const avg = (sales || []).length ? (sumTotal / sales.length) : 0;
+  const bestDay = [...byDay].sort((a, b) => Number(b.total || 0) - Number(a.total || 0))[0] || null;
 
   outlet.innerHTML = `
     <div class="d-flex align-items-center justify-content-between mb-3">
@@ -59,197 +68,222 @@ export async function renderSales(outlet){
     </div>
 
     <div class="row g-3 mb-3">
-      <div class="col-md-4">
+      <div class="col-md-3">
         <div class="card card-kpi p-3">
-          <div class="text-muted small">Ventas</div>
-          <div class="fs-4 fw-bold" id="kpiSales">${sales.length}</div>
+          <div class="text-muted small">Pedidos</div>
+          <div class="fs-4 fw-bold">${dashboard.orders}</div>
         </div>
       </div>
-      <div class="col-md-4">
+
+      <div class="col-md-3">
         <div class="card card-kpi p-3">
           <div class="text-muted small">Ingresos</div>
-          <div class="fs-4 fw-bold" id="kpiIncome">${money(sumTotal)}</div>
+          <div class="fs-4 fw-bold">${money(dashboard.income)}</div>
         </div>
       </div>
-      <div class="col-md-4">
+
+      <div class="col-md-3">
         <div class="card card-kpi p-3">
-          <div class="text-muted small">Promedio por venta</div>
-          <div class="fs-4 fw-bold" id="kpiAvg">${money(avg)}</div>
+          <div class="text-muted small">Promedio por pedido</div>
+          <div class="fs-4 fw-bold">${money(dashboard.avg)}</div>
+        </div>
+      </div>
+
+      <div class="col-md-3">
+        <div class="card card-kpi p-3">
+          <div class="text-muted small">Mejor día</div>
+          <div class="fw-bold">${safe(bestDay?.day || '—')}</div>
+          <div class="small text-muted">${money(bestDay?.total || 0)}</div>
         </div>
       </div>
     </div>
 
-    <div class="card p-3">
-      <div class="table-responsive">
-        <table id="tblSales" class="table table-striped align-middle" style="width:100%">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Fecha</th>
-              <th>Cliente</th>
-              <th>Método</th>
-              <th class="text-end">Total</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            ${(sales || []).map(s=>`
-              <tr>
-                <td class="fw-semibold">${safe(s.id)}</td>
-                <td>${formatDateTime(s.created_at || s.date || s.createdAt)}</td>
-                <td>${safe(s.customer_name || s.customerName || 'Mostrador')}</td>
-                <td>${safe(pmLabel(s.payment_method_id || s.paymentMethodId))}</td>
-                <td class="text-end fw-semibold">${money(s.total || 0)}</td>
-                <td class="text-nowrap">
-                  <button class="btn btn-sm btn-outline-brand" data-view="${safe(s.id)}">Detalle</button>
-                </td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
+    <div class="row g-3">
+      <div class="col-lg-8">
+        <div class="card p-3 h-100">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0">Ingresos por día</h6>
+            <span class="small text-muted">Pedidos no cancelados</span>
+          </div>
+          <div style="position: relative; height: 320px;">
+            <canvas id="chartOrdersByDay"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-4">
+        <div class="card p-3 h-100">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0">Métodos de pago</h6>
+            <span class="small text-muted">Distribución</span>
+          </div>
+          <div style="position: relative; height: 320px;">
+            <canvas id="chartPaymentMethods"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-7">
+        <div class="card p-3 h-100">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0">Top productos</h6>
+            <span class="small text-muted">Por cantidad vendida</span>
+          </div>
+          <div style="position: relative; height: 360px;">
+            <canvas id="chartTopProducts"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-5">
+        <div class="card p-3 h-100">
+          <h6 class="mb-2">Resumen rápido</h6>
+          <div class="small text-muted mb-2">Métodos de pago</div>
+
+          <div class="d-flex flex-column gap-2">
+            ${
+              paymentMethods.length
+                ? paymentMethods.map(pm => `
+                  <div class="border rounded p-2">
+                    <div class="d-flex justify-content-between">
+                      <div class="fw-semibold">${safe(pm.label || 'Método')}</div>
+                      <div class="fw-bold">${money(pm.total || 0)}</div>
+                    </div>
+                    <div class="small text-muted">
+                      Pedidos: ${Number(pm.qty || 0)}
+                    </div>
+                  </div>
+                `).join('')
+                : `<div class="text-muted">Sin datos disponibles.</div>`
+            }
+          </div>
+        </div>
       </div>
     </div>
   `;
 
-  // DataTables
-  if(window.$ && $.fn.dataTable){
-    if($.fn.DataTable.isDataTable('#tblSales')){
-      $('#tblSales').DataTable().destroy();
-    }
-    $('#tblSales').DataTable({
-      pageLength: 10,
-      order: [[1,'desc']],
-      language: {
-        search: "Buscar:",
-        lengthMenu: "Mostrar _MENU_",
-        info: "Mostrando _START_ a _END_ de _TOTAL_",
-        paginate: { previous: "Anterior", next: "Siguiente" },
-        zeroRecords: "No hay registros"
-      }
-    });
+  if (typeof Chart === 'undefined') {
+    console.error('Chart.js no está cargado');
+    return;
   }
 
-  // ====== DETALLE ======
-  outlet.addEventListener('click', async (e)=>{
-    const id = e.target?.dataset?.view;
-    if(!id) return;
+  const byDayLabels = byDay.map(x => x.day || 'Sin fecha');
+  const byDayTotals = byDay.map(x => Number(x.total || 0));
 
-    try{
-      // ✅ Detalle real desde API
-      const { data: sale } = await api.get(`/sales/${id}`);
+  const pmLabels = paymentMethods.map(x => x.label || `Método #${x.payment_method_id || ''}`);
+  const pmTotals = paymentMethods.map(x => Number(x.total || 0));
 
-      const items = (sale.items || []).map(it=>{
-        const name = it.name || (productById.get(Number(it.product_id))?.name) || `Producto ${it.product_id}`;
-        const sku = it.sku || (productById.get(Number(it.product_id))?.sku) || '';
-        const qty = Number(it.qty || 0);
-
-        const unit = Number(it.unit_price || 0);
-        const lineSubtotal = Number(it.line_subtotal ?? (unit * qty));
-        const itemDisc = Number(it.item_discount_amount || 0);
-        const lineTotal = Number(it.line_total ?? (lineSubtotal - itemDisc));
-
-        const discTag = itemDisc > 0
-          ? `<div class="small text-muted">Desc: <b>${money(itemDisc)}</b></div>`
-          : '';
-
-        return `
-          <tr>
-            <td class="fw-semibold">
-              ${safe(name)} ${sku ? `<span class="small text-muted">(${safe(sku)})</span>` : ''}
-              ${discTag}
-            </td>
-            <td class="text-center">${qty}</td>
-            <td class="text-end">${money(unit)}</td>
-            <td class="text-end">${money(lineSubtotal)}</td>
-            <td class="text-end fw-semibold">${money(lineTotal)}</td>
-          </tr>
-        `;
-      }).join('') || `
-        <tr><td colspan="5" class="text-muted">Sin productos.</td></tr>
-      `;
-
-      Swal.fire({
-        title: `Venta #${safe(sale.id)}`,
-        width: 900,
-        html: `
-          <div class="text-start">
-            <div>Fecha: <b>${formatDateTime(sale.created_at)}</b></div>
-            <div>Pago: <b>${safe(pmLabel(sale.payment_method_id))}</b></div>
-            ${sale.customer_name ? `<div>Cliente: <b>${safe(sale.customer_name)}</b></div>` : ''}
-
-            <hr class="my-2"/>
-
-            <div class="table-responsive">
-              <table class="table table-sm align-middle">
-                <thead>
-                  <tr>
-                    <th>Producto</th>
-                    <th class="text-center" style="width:90px;">Cant.</th>
-                    <th class="text-end" style="width:120px;">Precio</th>
-                    <th class="text-end" style="width:140px;">Subtotal</th>
-                    <th class="text-end" style="width:140px;">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${items}
-                </tbody>
-              </table>
-            </div>
-
-            <div class="d-flex justify-content-end">
-              <div style="min-width:320px;">
-                <div class="d-flex justify-content-between">
-                  <span class="text-muted">Subtotal</span>
-                  <span class="fw-semibold">${money(sale.subtotal || 0)}</span>
-                </div>
-                <div class="d-flex justify-content-between">
-                  <span class="text-muted">Descuento</span>
-                  <span class="fw-semibold">${money(sale.discount_amount || 0)}</span>
-                </div>
-                <div class="d-flex justify-content-between">
-                  <span class="text-muted">Total</span>
-                  <span class="fw-bold">${money(sale.total || 0)}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        `,
-        icon: 'info',
-        confirmButtonText: 'Cerrar'
-      });
-
-    }catch(err){
-      console.error(err);
-      Swal.fire('Error', err?.response?.data?.message || err.message || 'No se pudo cargar el detalle', 'error');
-    }
+  const topLabels = topProducts.map(x => {
+    const name = x.name || 'Producto';
+    const sku = x.sku ? ` (${x.sku})` : '';
+    return `${name}${sku}`;
   });
+  const topQty = topProducts.map(x => Number(x.qty || 0));
 
-  // ====== STOCK BAJO ======
-  outlet.querySelector('#btnLowStock').addEventListener('click', async ()=>{
-    try{
+  const ordersByDayCtx = outlet.querySelector('#chartOrdersByDay');
+  const paymentMethodsCtx = outlet.querySelector('#chartPaymentMethods');
+  const topProductsCtx = outlet.querySelector('#chartTopProducts');
+
+  if (ordersByDayCtx) {
+    salesCharts.push(new Chart(ordersByDayCtx, {
+      type: 'bar',
+      data: {
+        labels: byDayLabels,
+        datasets: [{
+          label: 'Ingresos',
+          data: byDayTotals
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true }
+        },
+        scales: {
+          y: {
+            beginAtZero: true
+          }
+        }
+      }
+    }));
+  }
+
+  if (paymentMethodsCtx) {
+    salesCharts.push(new Chart(paymentMethodsCtx, {
+      type: 'doughnut',
+      data: {
+        labels: pmLabels,
+        datasets: [{
+          label: 'Métodos de pago',
+          data: pmTotals
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'bottom' }
+        }
+      }
+    }));
+  }
+
+  if (topProductsCtx) {
+    salesCharts.push(new Chart(topProductsCtx, {
+      type: 'bar',
+      data: {
+        labels: topLabels,
+        datasets: [{
+          label: 'Cantidad vendida',
+          data: topQty
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true }
+        },
+        scales: {
+          x: {
+            beginAtZero: true
+          }
+        }
+      }
+    }));
+  }
+
+  outlet.querySelector('#btnLowStock')?.addEventListener('click', async () => {
+    try {
       const { data: low } = await api.get('/inventory/low-stock');
 
-      if(!Array.isArray(low) || low.length === 0){
-        Swal.fire('Todo bien','No hay productos en stock bajo.','success');
+      if (!Array.isArray(low) || low.length === 0) {
+        Swal.fire('Todo bien', 'No hay productos en stock bajo.', 'success');
         return;
       }
 
-      const html = low.map(r=>{
+      const html = low.map(r => {
         const p = r.product || r;
         const sku = p.sku || '';
         const name = p.name || '';
         const st = Number(r.stock ?? p.stock ?? 0);
         const min = Number(p.minStock ?? p.min_stock ?? 0);
+
         return `• <b>${safe(sku)}</b> — ${safe(name)} (stock: <b>${st}</b>, mín: ${min})`;
       }).join('<br>');
 
-      Swal.fire({ title: 'Stock bajo', html, icon: 'warning' });
-
-    }catch(err){
-      // si aún no existe endpoint
+      Swal.fire({
+        title: 'Stock bajo',
+        html,
+        icon: 'warning'
+      });
+    } catch (err) {
+      console.error(err);
       Swal.fire(
         'Falta endpoint',
-        'Aún no existe /inventory/low-stock en tu API. Si quieres, lo armamos en InventoryController.',
+        'No existe o está fallando /inventory/low-stock.',
         'info'
       );
     }

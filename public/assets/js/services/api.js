@@ -4,23 +4,23 @@ import { authService } from './authService.js';
 
 class ApiService {
   constructor() {
-    // ✅ Laravel API
     this.baseURL = 'http://127.0.0.1:8000/api';
-
-    // ✅ Cambia a false para usar backend real
     this.useMock = false;
 
-    this.client = axios.create({ baseURL: this.baseURL, timeout: 12000 });
+    this.client = axios.create({
+      baseURL: this.baseURL,
+      timeout: 20000
+    });
 
     this.client.interceptors.request.use((config) => {
       const token = authService.getToken();
 
-      // ✅ Siempre JSON (evita redirects/errores raros en API)
       config.headers = config.headers || {};
       config.headers.Accept = 'application/json';
 
-      // ✅ Token si existe
-      if (token) config.headers.Authorization = `Bearer ${token}`;
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+      }
 
       return config;
     });
@@ -30,49 +30,57 @@ class ApiService {
       (err) => {
         const status = err?.response?.status;
 
-        // ✅ Si el backend responde HTML (por redirect), aquí lo notas rápido
-        // console.log('API ERROR', status, err?.response?.headers, err?.response?.data);
-
         if (status === 401) {
           authService.logout();
           location.hash = '#/login';
         }
+
         return Promise.reject(err);
       }
     );
   }
 
-  /**
-   * ✅ Descargar blobs (imágenes protegidas)
-   * - Siempre manda token
-   * - Siempre manda Accept: application/json (para que API no intente redirect)
-   * - No usa mock (porque imágenes vienen del backend real)
-   */
-  async getBlob(path){
-  const token = authService.getToken();
-  const url = this.baseURL.replace(/\/$/,'') + path;
+  resolveUrl(path = '') {
+    const p = String(path || '').trim();
 
-  const res = await fetch(url, {
-  method: 'GET',
-  headers: {
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    'Accept': 'application/json'
-  },
-});
+    if (!p) return this.baseURL;
 
-  if(res.status === 401){
-    authService.logout();
-    location.hash = '#/login';
-    throw new Error('No autorizado');
+    if (/^https?:\/\//i.test(p)) {
+      return p;
+    }
+
+    if (p.startsWith('/')) {
+      return `${this.baseURL.replace(/\/$/, '')}${p}`;
+    }
+
+    return `${this.baseURL.replace(/\/$/, '')}/${p}`;
   }
 
-  if(!res.ok){
-    const text = await res.text().catch(()=> '');
-    throw new Error(`GET BLOB failed ${res.status}: ${text}`);
-  }
-  return await res.blob();
-}
+  async getBlob(path) {
+    const token = authService.getToken();
+    const url = this.resolveUrl(path);
 
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        Accept: 'application/json'
+      }
+    });
+
+    if (res.status === 401) {
+      authService.logout();
+      location.hash = '#/login';
+      throw new Error('No autorizado');
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`GET BLOB failed ${res.status}: ${text}`);
+    }
+
+    return await res.blob();
+  }
 
   async _readMockDB() {
     const res = await fetch('../api/mock-data.json', { cache: 'no-store' });
@@ -123,6 +131,11 @@ class ApiService {
   async put(path, body, config = {}) {
     if (this.useMock) return { data: { ok: true, body } };
     return await this.client.put(path, body, config);
+  }
+
+  async patch(path, body, config = {}) {
+    if (this.useMock) return { data: { ok: true, body } };
+    return await this.client.patch(path, body, config);
   }
 
   async delete(path, config = {}) {
