@@ -121,6 +121,9 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // Auth
         Route::post('/auth/register', [AuthController::class, 'register']);
+        Route::get('/users', [AuthController::class, 'usersIndex']);
+        Route::put('/users/{id}', [AuthController::class, 'updateUser']);
+        Route::delete('/users/{id}', [AuthController::class, 'deleteUser']);
 
         // Opticas
         Route::post('/opticas', [OpticasController::class, 'store']);
@@ -137,6 +140,5 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/categories/{id}', [CategoriesController::class, 'update']);
         Route::delete('/categories/{id}', [CategoriesController::class, 'destroy']);
 
-        Route::get('/users', [AuthController::class, 'usersIndex']);
     });
 });
