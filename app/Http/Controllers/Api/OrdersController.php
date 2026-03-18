@@ -364,62 +364,95 @@ class OrdersController extends Controller
     }
 
     public function cancel(Request $request, $id)
-    {
-        $u = $request->user();
-        $role = $u?->role?->name;
+{
+    $u = $request->user();
+    $role = $u?->role?->name;
 
-        if (!in_array($role, ['optica', 'admin', 'employee'], true)) {
+    if (!in_array($role, ['optica', 'admin'], true)) {
+        return response()->json(['message' => 'No autorizado'], 403);
+    }
+
+    return DB::transaction(function () use ($id, $u, $role) {
+        $order = Order::query()
+            ->whereNull('deleted_at')
+            ->lockForUpdate()
+            ->with(['items'])
+            ->findOrFail($id);
+
+        if ($role === 'optica' && (int) $order->optica_id !== (int) $u->optica_id) {
             return response()->json(['message' => 'No autorizado'], 403);
         }
 
-        return DB::transaction(function () use ($id, $u, $role) {
-            $order = Order::query()
-                ->whereNull('deleted_at')
+        if ($role === 'optica' && $order->process_status !== 'en_proceso') {
+            return response()->json([
+                'message' => 'La óptica solo puede cancelar cuando el pedido está en proceso',
+                'errors' => ['process_status' => ['Estado no cancelable para óptica']]
+            ], 422);
+        }
+
+        if ($role === 'admin' && $order->process_status !== 'revision') {
+            return response()->json([
+                'message' => 'Admin solo puede cancelar cuando el pedido está en revisión',
+                'errors' => ['process_status' => ['Estado no cancelable para admin']]
+            ], 422);
+        }
+
+        if ($order->process_status === 'cancelado') {
+            return response()->json([
+                'message' => 'El pedido ya está cancelado'
+            ], 422);
+        }
+
+        foreach ($order->items as $it) {
+            $pid = (int) $it->product_id;
+            $qty = (int) $it->qty;
+
+            $inv = DB::table('inventory')
+                ->where('product_id', $pid)
                 ->lockForUpdate()
-                ->with(['items'])
-                ->findOrFail($id);
+                ->first();
 
-            if ($role === 'optica' && (int) $order->optica_id !== (int) $u->optica_id) {
-                return response()->json(['message' => 'No autorizado'], 403);
+            if (!$inv) {
+                abort(response()->json([
+                    'message' => 'Inventario no encontrado',
+                    'errors' => ['inventory' => ["No existe inventory para product_id={$pid}"]]
+                ], 422));
             }
 
-            if ($order->process_status !== 'en_preparacion') {
-                return response()->json([
-                    'message' => 'Solo se puede cancelar cuando está en preparación',
-                    'errors' => ['process_status' => ['Estado no cancelable']]
-                ], 422);
+            DB::table('inventory')
+            ->where('product_id', $pid)
+            ->update([
+                'reserved' => DB::raw('GREATEST(reserved - ' . (int) $qty . ', 0)'),
+                'updated_at' => now(),
+            ]);
+
+            if (DB::getSchemaBuilder()->hasTable('inventory_movements')) {
+                DB::table('inventory_movements')->insert([
+                    'product_id' => $pid,
+                    'variant_id' => $it->variant_id,
+                    'movement_type' => 'unreserve',
+                    'qty' => $qty,
+                    'reference_type' => 'order_cancel',
+                    'reference_id' => $order->id,
+                    'note' => 'Liberación de reserva por cancelación de pedido',
+                    'created_by' => $u->id,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
             }
+        }
 
-            foreach ($order->items as $it) {
-                $pid = (int) $it->product_id;
-                $qty = (int) $it->qty;
+        $order->process_status = 'cancelado';
+        $order->save();
 
-                $inv = DB::table('inventory')
-                    ->where('product_id', $pid)
-                    ->lockForUpdate()
-                    ->first();
+        return response()->json([
+            'ok' => true,
+            'message' => 'Pedido cancelado',
+            'order_id' => $order->id
+        ], 200);
+    });
+}
 
-                if (!$inv) {
-                    abort(response()->json([
-                        'message' => 'Inventario no encontrado',
-                        'errors' => ['inventory' => ["No existe inventory para product_id={$pid}"]]
-                    ], 422));
-                }
-
-                DB::table('inventory')
-                    ->where('product_id', $pid)
-                    ->update([
-                        'reserved' => DB::raw('GREATEST(reserved - ' . (int) $qty . ', 0)'),
-                        'updated_at' => now(),
-                    ]);
-            }
-
-            $order->process_status = 'cancelado';
-            $order->save();
-
-            return response()->json(['ok' => true, 'order_id' => $order->id], 200);
-        });
-    }
 
     public function update(Request $request, $id)
     {
