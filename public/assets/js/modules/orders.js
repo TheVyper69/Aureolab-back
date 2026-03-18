@@ -1,15 +1,3 @@
-// public/assets/js/pages/orders.js
-// - DataTables en vista óptica y admin/employee
-// - Sin paginado manual
-// - Recarga la tabla después de actualizar estatus
-// - Óptica: solo ve sus pedidos
-// - Admin/Employee: ven todos
-// - Modal de detalle del pedido
-// - Cambio de estatus
-// - Botón para ver detalle completo del producto ordenado
-// - Muestra tratamientos, eje y notas por item
-// - Muestra fecha de pago si existe
-
 import { api } from '../services/api.js';
 import { ordersService } from '../services/ordersService.js';
 import { money, formatDateTime } from '../utils/helpers.js';
@@ -39,21 +27,28 @@ const PAYMENT_BADGE = {
 
 const PROCESS_LABEL = {
   en_proceso: 'En proceso',
+  en_preparacion: 'En preparación',
   listo_para_entregar: 'Listo para entregar',
   entregado: 'Entregado',
   revision: 'Revisión',
-  en_preparacion: 'En preparación',
   cancelado: 'Cancelado'
 };
 
 const PROCESS_BADGE = {
   en_proceso: 'text-bg-info',
+  en_preparacion: 'text-bg-secondary',
   listo_para_entregar: 'text-bg-primary',
   entregado: 'text-bg-success',
   revision: 'text-bg-danger',
-  en_preparacion: 'text-bg-secondary',
   cancelado: 'text-bg-dark'
 };
+
+const PROCESS_FLOW = [
+  'en_proceso',
+  'en_preparacion',
+  'listo_para_entregar',
+  'entregado'
+];
 
 function safe(v) {
   return String(v ?? '')
@@ -77,8 +72,12 @@ async function updateOrderPatch(orderId, patch) {
   if (typeof ordersService?.update === 'function') return await ordersService.update(orderId, patch);
   if (typeof ordersService?.patch === 'function') return await ordersService.patch(orderId, patch);
   if (typeof ordersService?.updateStatus === 'function') return await ordersService.updateStatus(orderId, patch);
-
   return await api.patch(`/orders/${orderId}`, patch);
+}
+
+async function cancelOrder(orderId) {
+  if (typeof ordersService?.cancel === 'function') return await ordersService.cancel(orderId);
+  return await api.patch(`/orders/${orderId}/cancel`);
 }
 
 function normalizeOrder(o) {
@@ -221,6 +220,49 @@ async function fetchOrdersAll() {
   return un.rows || [];
 }
 
+function getAllowedProcessOptions(role, currentStatus) {
+  const current = String(currentStatus || 'en_proceso');
+
+  if (current === 'cancelado') return ['cancelado'];
+
+  if (role === 'employee') {
+    if (current === 'revision') return ['revision'];
+    const idx = PROCESS_FLOW.indexOf(current);
+    if (idx === -1) return ['en_proceso'];
+    return PROCESS_FLOW.slice(idx);
+  }
+
+  if (role === 'admin') {
+    if (current === 'revision') return ['revision'];
+    if (current === 'entregado') return ['entregado', 'revision'];
+    const idx = PROCESS_FLOW.indexOf(current);
+    if (idx === -1) return ['en_proceso'];
+    return PROCESS_FLOW.slice(idx);
+  }
+
+  return [current];
+}
+
+function canOpticaCancel(procSt) {
+  return procSt === 'en_proceso';
+}
+
+function canAdminCancel(procSt) {
+  return procSt === 'revision';
+}
+
+function canAdminSendToRevision(procSt) {
+  return procSt === 'entregado';
+}
+
+function modalTableWrap(innerHtml) {
+  return `
+    <div style="width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch;">
+      ${innerHtml}
+    </div>
+  `;
+}
+
 function showOrderedProductDetail(product, fallback = {}) {
   if (!product && !fallback?.productId) {
     Swal.fire('No encontrado', 'No se encontró la información del producto.', 'warning');
@@ -269,44 +311,44 @@ function showOrderedProductDetail(product, fallback = {}) {
 
   Swal.fire({
     title: `Producto: ${safe(p.name || fallback.productName || 'Producto')}`,
-    width: 850,
+    width: Math.min(window.innerWidth - 24, 900),
     html: `
       <div class="text-start">
         <div class="row g-2">
           <div class="col-6">
             <div class="small text-muted">SKU</div>
-            <div class="fw-semibold">${safe(p.sku || fallback.productSku || fallback.productId || '—')}</div>
+            <div class="fw-semibold" style="word-break:break-word;">${safe(p.sku || fallback.productSku || fallback.productId || '—')}</div>
           </div>
           <div class="col-6">
             <div class="small text-muted">Nombre</div>
-            <div class="fw-semibold">${safe(p.name || fallback.productName || 'Producto')}</div>
+            <div class="fw-semibold" style="word-break:break-word;">${safe(p.name || fallback.productName || 'Producto')}</div>
           </div>
 
           <div class="col-6">
             <div class="small text-muted">Categoría</div>
-            <div class="fw-semibold">${safe(p.category_name || p.category || p.category_code || '—')}</div>
+            <div class="fw-semibold" style="word-break:break-word;">${safe(p.category_name || p.category || p.category_code || '—')}</div>
           </div>
           <div class="col-6">
             <div class="small text-muted">Tipo</div>
-            <div class="fw-semibold">${safe(p.type || '—')}</div>
+            <div class="fw-semibold" style="word-break:break-word;">${safe(p.type || '—')}</div>
           </div>
 
           <div class="col-6">
             <div class="small text-muted">Marca</div>
-            <div class="fw-semibold">${safe(p.brand || '—')}</div>
+            <div class="fw-semibold" style="word-break:break-word;">${safe(p.brand || '—')}</div>
           </div>
           <div class="col-6">
             <div class="small text-muted">Modelo</div>
-            <div class="fw-semibold">${safe(p.model || '—')}</div>
+            <div class="fw-semibold" style="word-break:break-word;">${safe(p.model || '—')}</div>
           </div>
 
           <div class="col-6">
             <div class="small text-muted">Material</div>
-            <div class="fw-semibold">${safe(p.material || '—')}</div>
+            <div class="fw-semibold" style="word-break:break-word;">${safe(p.material || '—')}</div>
           </div>
           <div class="col-6">
             <div class="small text-muted">Tamaño</div>
-            <div class="fw-semibold">${safe(p.size || '—')}</div>
+            <div class="fw-semibold" style="word-break:break-word;">${safe(p.size || '—')}</div>
           </div>
 
           <div class="col-6">
@@ -332,7 +374,7 @@ function showOrderedProductDetail(product, fallback = {}) {
 
         <div class="mt-3">
           <div class="small text-muted">Descripción</div>
-          <div class="fw-semibold">${safe(p.description || '—')}</div>
+          <div class="fw-semibold" style="word-break:break-word;">${safe(p.description || '—')}</div>
         </div>
 
         ${treatmentHtml}
@@ -357,11 +399,7 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
 
   const canAdminEditPayment = role === 'admin';
   const canEditProcess = (role === 'admin' || role === 'employee');
-  const employeeLocked = (role === 'employee' && procSt === 'entregado');
-
-  const procOptionsEmployee = ['en_proceso', 'listo_para_entregar', 'entregado'];
-  const procOptionsAdmin = ['en_proceso', 'listo_para_entregar', 'entregado', 'revision'];
-  const procOptions = (role === 'admin') ? procOptionsAdmin : procOptionsEmployee;
+  const processOptions = getAllowedProcessOptions(role, procSt);
 
   const itemsHtml = (o.items || []).map((it, idx) => {
     const p = productsMap.get(String(it.productId)) || {};
@@ -375,7 +413,7 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
     const treatments = Array.isArray(it.treatments) ? it.treatments : [];
     const treatmentsHtml = treatments.length
       ? `
-        <div class="small text-muted mt-1">
+        <div class="small text-muted mt-1" style="white-space:normal; word-break:break-word;">
           <b>Tratamientos:</b>
           ${treatments.map(t => safe(t?.name || t?.code || `#${t?.id ?? ''}`)).join(', ')}
         </div>
@@ -387,22 +425,22 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
       : '';
 
     const notesHtml = it.itemNotes
-      ? `<div class="small text-muted mt-1"><b>Notas:</b> ${safe(it.itemNotes)}</div>`
+      ? `<div class="small text-muted mt-1" style="white-space:normal; word-break:break-word;"><b>Notas:</b> ${safe(it.itemNotes)}</div>`
       : '';
 
     return `
       <tr>
-        <td>${safe(sku)}</td>
-        <td>
+        <td style="min-width:110px; white-space:nowrap;">${safe(sku)}</td>
+        <td style="min-width:240px; white-space:normal; word-break:break-word;">
           <div class="fw-semibold">${safe(name)}</div>
           ${treatmentsHtml}
           ${axisHtml}
           ${notesHtml}
         </td>
-        <td class="text-end">${qty}</td>
-        <td class="text-end">${money(unit)}</td>
-        <td class="text-end fw-semibold">${money(line)}</td>
-        <td class="text-end">
+        <td class="text-end" style="min-width:70px; white-space:nowrap;">${qty}</td>
+        <td class="text-end" style="min-width:110px; white-space:nowrap;">${money(unit)}</td>
+        <td class="text-end fw-semibold" style="min-width:110px; white-space:nowrap;">${money(line)}</td>
+        <td class="text-end" style="min-width:110px; white-space:nowrap;">
           <button
             type="button"
             class="btn btn-sm btn-outline-secondary"
@@ -423,7 +461,26 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
     pmLabel = PM_CODE_LABEL[key] || o.paymentMethod || '—';
   }
 
-  const controlsHtml = (role === 'optica')
+  const opticaControlsHtml = role === 'optica'
+    ? `
+      <div class="mt-3 p-3 border rounded bg-light">
+        <div class="fw-semibold mb-2">Acciones disponibles</div>
+        ${
+          canOpticaCancel(procSt)
+            ? `
+              <div class="d-flex justify-content-end">
+                <button class="btn btn-sm btn-outline-danger" id="btnOpticaCancelOrder">
+                  Cancelar pedido
+                </button>
+              </div>
+            `
+            : `<div class="small text-muted">La óptica solo puede cancelar cuando el pedido está en <b>En proceso</b>.</div>`
+        }
+      </div>
+    `
+    : '';
+
+  const adminEmployeeControlsHtml = role === 'optica'
     ? ''
     : `
       <div class="mt-3 p-3 border rounded bg-light">
@@ -450,23 +507,36 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
             ${
               canEditProcess
                 ? `
-                  <select class="form-select form-select-sm" id="selProcessStatus" ${employeeLocked ? 'disabled' : ''}>
-                    ${procOptions.map(v => `
+                  <select class="form-select form-select-sm" id="selProcessStatus">
+                    ${processOptions.map(v => `
                       <option value="${v}" ${v === procSt ? 'selected' : ''}>${PROCESS_LABEL[v]}</option>
                     `).join('')}
                   </select>
-                  ${
-                    employeeLocked
-                      ? `<div class="small text-muted mt-1">Entregado: solo admin puede moverlo a <b>Revisión</b>.</div>`
-                      : (role === 'employee'
-                          ? `<div class="small text-muted mt-1">Si lo cambias a <b>Entregado</b>, ya no podrás modificarlo.</div>`
-                          : `<div class="small text-muted mt-1">Admin puede usar <b>Revisión</b> para inconformidades.</div>`)
-                  }
+                  <div class="small text-muted mt-1">
+                    ${
+                      role === 'admin'
+                        ? 'Admin puede mandar a revisión solo pedidos entregados y cancelar solo desde revisión.'
+                        : 'Empleado solo puede avanzar el pedido en el flujo normal.'
+                    }
+                  </div>
                 `
                 : `<div>${badgeHtml('process', procSt)}</div>`
             }
           </div>
         </div>
+
+        ${
+          role === 'admin' && canAdminCancel(procSt)
+            ? `
+              <div class="d-flex justify-content-between align-items-center mt-3 gap-2 flex-wrap">
+                <div class="small text-muted">Este pedido ya está en revisión. Puedes cancelarlo.</div>
+                <button class="btn btn-sm btn-outline-danger" id="btnAdminCancelOrder">
+                  Cancelar pedido
+                </button>
+              </div>
+            `
+            : ''
+        }
 
         <div class="d-flex justify-content-end mt-3">
           <button class="btn btn-sm btn-brand" id="btnSaveStatus">Guardar cambios</button>
@@ -488,6 +558,22 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
       </div>
     `;
 
+  const itemsTableHtml = modalTableWrap(`
+    <table class="table table-sm align-middle mb-0" style="min-width:760px;">
+      <thead>
+        <tr>
+          <th style="min-width:110px;">SKU</th>
+          <th style="min-width:240px;">Producto</th>
+          <th class="text-end" style="min-width:70px;">Cant.</th>
+          <th class="text-end" style="min-width:110px;">Precio</th>
+          <th class="text-end" style="min-width:110px;">Importe</th>
+          <th class="text-end" style="min-width:110px;">Acción</th>
+        </tr>
+      </thead>
+      <tbody>${itemsHtml}</tbody>
+    </table>
+  `);
+
   const html = `
     <div class="text-start">
       <div class="row g-2">
@@ -502,7 +588,7 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
 
         <div class="col-6">
           <div class="small text-muted">Óptica</div>
-          <div class="fw-semibold">${safe(opticaName)}</div>
+          <div class="fw-semibold" style="word-break:break-word;">${safe(opticaName)}</div>
         </div>
         <div class="col-6">
           <div class="small text-muted">Pago (método)</div>
@@ -524,31 +610,18 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
       ${o.notes ? `
         <div class="mt-3">
           <div class="small text-muted">Notas</div>
-          <div class="fw-semibold">${safe(o.notes)}</div>
+          <div class="fw-semibold" style="word-break:break-word;">${safe(o.notes)}</div>
         </div>
       ` : ''}
 
-      ${controlsHtml}
+      ${opticaControlsHtml}
+      ${adminEmployeeControlsHtml}
 
       <hr class="my-3"/>
 
-      <div class="table-responsive">
-        <table class="table table-sm align-middle">
-          <thead>
-            <tr>
-              <th>SKU</th>
-              <th>Producto</th>
-              <th class="text-end">Cant.</th>
-              <th class="text-end">Precio</th>
-              <th class="text-end">Importe</th>
-              <th class="text-end">Acción</th>
-            </tr>
-          </thead>
-          <tbody>${itemsHtml}</tbody>
-        </table>
-      </div>
+      ${itemsTableHtml}
 
-      <div class="d-flex justify-content-end mt-2">
+      <div class="d-flex justify-content-end mt-3">
         <div class="fw-bold fs-5">Total: ${money(o.total || 0)}</div>
       </div>
     </div>
@@ -557,10 +630,18 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
   await Swal.fire({
     title: `Detalle del pedido #${o.id}`,
     html,
-    width: 980,
+    width: Math.min(window.innerWidth - 24, 1100),
     icon: 'info',
     confirmButtonText: 'Cerrar',
+    customClass: {
+      popup: 'swal2-order-modal'
+    },
     didOpen: () => {
+      const popup = Swal.getPopup();
+      if (popup) {
+        popup.style.maxWidth = '1100px';
+      }
+
       const htmlContainer = Swal.getHtmlContainer();
 
       htmlContainer?.querySelectorAll('[data-view-product]').forEach(btn => {
@@ -577,7 +658,68 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
         });
       });
 
+      const opticaCancelBtn = htmlContainer?.querySelector('#btnOpticaCancelOrder');
+      if (opticaCancelBtn) {
+        opticaCancelBtn.addEventListener('click', async () => {
+          if (!canOpticaCancel(procSt)) {
+            Swal.fire('No permitido', 'La óptica solo puede cancelar cuando el pedido está en En proceso.', 'warning');
+            return;
+          }
+
+          const confirm = await Swal.fire({
+            title: '¿Cancelar pedido?',
+            text: 'Esta acción cancelará el pedido y liberará la reserva correspondiente.',
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonText: 'Sí, cancelar'
+          });
+
+          if (!confirm.isConfirmed) return;
+
+          try {
+            await cancelOrder(o.id);
+            if (typeof ctx?.onReload === 'function') await ctx.onReload();
+            Swal.fire('Listo', 'Pedido cancelado.', 'success');
+          } catch (err) {
+            Swal.fire('Error', err?.response?.data?.message || 'No se pudo cancelar el pedido.', 'error');
+          }
+        });
+      }
+
       if (role === 'optica') return;
+
+      const adminCancelBtn = htmlContainer?.querySelector('#btnAdminCancelOrder');
+      if (adminCancelBtn) {
+        adminCancelBtn.addEventListener('click', async () => {
+          if (role !== 'admin') {
+            Swal.fire('No permitido', 'Solo admin puede cancelar desde revisión.', 'warning');
+            return;
+          }
+
+          if (!canAdminCancel(procSt)) {
+            Swal.fire('No permitido', 'Admin solo puede cancelar cuando el pedido está en Revisión.', 'warning');
+            return;
+          }
+
+          const confirm = await Swal.fire({
+            title: '¿Cancelar pedido?',
+            text: 'Esta acción cancelará el pedido y liberará la reserva correspondiente.',
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonText: 'Sí, cancelar'
+          });
+
+          if (!confirm.isConfirmed) return;
+
+          try {
+            await cancelOrder(o.id);
+            if (typeof ctx?.onReload === 'function') await ctx.onReload();
+            Swal.fire('Listo', 'Pedido cancelado.', 'success');
+          } catch (err) {
+            Swal.fire('Error', err?.response?.data?.message || 'No se pudo cancelar el pedido.', 'error');
+          }
+        });
+      }
 
       const btn = htmlContainer?.querySelector('#btnSaveStatus');
       if (!btn) return;
@@ -599,13 +741,36 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
             Swal.fire('No permitido', 'Tu rol no puede cambiar el estatus de proceso.', 'warning');
             return;
           }
-          if (role === 'employee' && procSt === 'entregado') {
-            Swal.fire('Bloqueado', 'Entregado: solo admin puede moverlo a Revisión.', 'warning');
-            return;
+
+          if (role === 'employee') {
+            if (nextProc === 'revision' || nextProc === 'cancelado') {
+              Swal.fire('No permitido', 'Empleado no puede mandar a revisión ni cancelar.', 'warning');
+              return;
+            }
+
+            const allowedEmployee = getAllowedProcessOptions('employee', procSt);
+            if (!allowedEmployee.includes(nextProc)) {
+              Swal.fire('No permitido', 'El empleado solo puede avanzar el pedido en el flujo permitido.', 'warning');
+              return;
+            }
           }
-          if (role !== 'admin' && nextProc === 'revision') {
-            Swal.fire('No permitido', 'Solo admin puede poner el pedido en Revisión.', 'warning');
-            return;
+
+          if (role === 'admin') {
+            if (nextProc === 'revision' && !canAdminSendToRevision(procSt)) {
+              Swal.fire('No permitido', 'Admin solo puede mandar a revisión pedidos entregados.', 'warning');
+              return;
+            }
+
+            if (nextProc === 'cancelado') {
+              Swal.fire('No permitido', 'El estado cancelado no se cambia desde el selector. Usa el botón Cancelar pedido.', 'warning');
+              return;
+            }
+
+            const allowedAdmin = getAllowedProcessOptions('admin', procSt);
+            if (!allowedAdmin.includes(nextProc)) {
+              Swal.fire('No permitido', 'Ese cambio de estado no está permitido.', 'warning');
+              return;
+            }
           }
         }
 
@@ -632,13 +797,8 @@ async function showOrderDetail(order, productsMap, opticasById, ctx) {
           const res = await updateOrderPatch(o.id, patch);
           const updated = normalizeOrder({ ...o, ...patch, ...(res?.data || res || {}) });
 
-          if (typeof ctx?.onReload === 'function') {
-            await ctx.onReload();
-          }
-
-          if (typeof ctx?.onLocalUpdate === 'function') {
-            ctx.onLocalUpdate(o.id, updated);
-          }
+          if (typeof ctx?.onReload === 'function') await ctx.onReload();
+          if (typeof ctx?.onLocalUpdate === 'function') ctx.onLocalUpdate(o.id, updated);
 
           Swal.fire('Listo', 'Estatus actualizado.', 'success');
         } catch (err) {

@@ -69,6 +69,19 @@ function eyeIcon(open = false) {
   `;
 }
 
+function getCheckedPaymentMethods() {
+  return Array.from(document.querySelectorAll('.js-optica-payment:checked'))
+    .map(el => Number(el.value))
+    .filter(v => [1, 2, 3].includes(v));
+}
+
+function setCheckedPaymentMethods(values = []) {
+  const set = new Set((Array.isArray(values) ? values : []).map(v => Number(v)));
+  document.querySelectorAll('.js-optica-payment').forEach(el => {
+    el.checked = set.has(Number(el.value));
+  });
+}
+
 export async function renderUsers(outlet) {
   let users = [];
   let editingUserId = null;
@@ -225,6 +238,26 @@ export async function renderUsers(outlet) {
                         <label class="form-label">Contacto de la óptica</label>
                         <input class="form-control" id="uOpticaContacto">
                       </div>
+
+                      <div class="col-md-12">
+                        <label class="form-label d-block">Métodos de pago</label>
+                        <div class="d-flex flex-wrap gap-3 mt-1">
+                          <div class="form-check">
+                            <input class="form-check-input js-optica-payment" type="checkbox" id="pmCash" value="1">
+                            <label class="form-check-label" for="pmCash">Efectivo</label>
+                          </div>
+
+                          <div class="form-check">
+                            <input class="form-check-input js-optica-payment" type="checkbox" id="pmTransfer" value="2">
+                            <label class="form-check-label" for="pmTransfer">Transferencia</label>
+                          </div>
+
+                          <div class="form-check">
+                            <input class="form-check-input js-optica-payment" type="checkbox" id="pmCard" value="3">
+                            <label class="form-check-label" for="pmCard">Tarjeta</label>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
 
@@ -283,6 +316,7 @@ export async function renderUsers(outlet) {
 
       if (!isOptica) {
         document.getElementById('uOpticaContacto').value = '';
+        setCheckedPaymentMethods([]);
       }
     };
 
@@ -321,6 +355,9 @@ export async function renderUsers(outlet) {
       `;
       document.getElementById('uRole').value = 'employee';
 
+      document.getElementById('uOpticaContacto').value = '';
+      setCheckedPaymentMethods([]);
+
       modalTitle.textContent = 'Alta de usuario';
 
       toggleOpticaFields();
@@ -349,6 +386,8 @@ export async function renderUsers(outlet) {
         `;
         document.getElementById('uRole').value = user.role ?? 'employee';
       }
+
+      setCheckedPaymentMethods(user.payment_methods || []);
 
       modalTitle.textContent = 'Editar usuario';
 
@@ -428,9 +467,19 @@ export async function renderUsers(outlet) {
         return;
       }
 
-      if (payload.role === 'optica' && !payload.optica_contacto) {
-        Swal.fire('Falta contacto', 'Debes capturar el contacto de la óptica.', 'info');
-        return;
+      if (payload.role === 'optica') {
+        if (!payload.optica_contacto) {
+          Swal.fire('Falta contacto', 'Debes capturar el contacto de la óptica.', 'info');
+          return;
+        }
+
+        const paymentMethods = getCheckedPaymentMethods();
+        if (!paymentMethods.length) {
+          Swal.fire('Faltan métodos de pago', 'Selecciona al menos un método de pago para la óptica.', 'info');
+          return;
+        }
+
+        payload.payment_methods = paymentMethods;
       }
 
       if (!isEdit) {

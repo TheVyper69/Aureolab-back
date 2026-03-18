@@ -72,3 +72,10 @@ ALTER TABLE order_items ADD INDEX idx_product (product_id);
 ALTER TABLE orders
 ADD COLUMN paid_at DATETIME NULL AFTER payment_status;
 
+
+
+ALTER TABLE inventory_movements
+MODIFY COLUMN movement_type ENUM('in','out','reserve','unreserve') NOT NULL;
+
+ALTER TABLE inventory_movements
+MODIFY COLUMN reference_type ENUM('manual','order','order_cancel') NOT NULL;
