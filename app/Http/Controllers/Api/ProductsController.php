@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 
 class ProductsController extends Controller
 {
@@ -55,6 +56,74 @@ class ProductsController extends Controller
         return (int) $cat->id;
     }
 
+    private function isLensCategory(int $categoryId): bool
+    {
+        $cat = Category::whereNull('deleted_at')->find($categoryId);
+        $code = strtoupper((string) ($cat?->code ?? ''));
+
+        return in_array($code, ['MICAS', 'LENTES_CONTACTO'], true);
+    }
+
+    private function normalizeOpticalFields(array &$data, int $categoryId, ?Product $product = null): void
+    {
+        $isLens = $this->isLensCategory($categoryId);
+
+        if (!$isLens) {
+            $data['supplier_id'] = null;
+            $data['box_id'] = null;
+            $data['lens_type_id'] = null;
+            $data['material_id'] = null;
+            $data['sphere'] = null;
+            $data['cylinder'] = null;
+            $data['axis'] = null;
+            return;
+        }
+
+        $effectiveCylinder = array_key_exists('cylinder', $data)
+            ? $data['cylinder']
+            : ($product?->cylinder ?? null);
+
+        $effectiveAxis = array_key_exists('axis', $data)
+            ? $data['axis']
+            : ($product?->axis ?? null);
+
+        if (!is_null($effectiveCylinder) && $effectiveCylinder >= 0) {
+            abort(response()->json([
+                'message' => 'Error de validación',
+                'errors' => [
+                    'cylinder' => ['El cilindro debe ser negativo y no puede ser 0.']
+                ]
+            ], 422));
+        }
+
+        if (!is_null($effectiveCylinder) && is_null($effectiveAxis)) {
+            abort(response()->json([
+                'message' => 'Error de validación',
+                'errors' => [
+                    'axis' => ['Si capturas cilindro debes capturar el eje.']
+                ]
+            ], 422));
+        }
+
+        if (is_null($effectiveCylinder) && !is_null($effectiveAxis)) {
+            abort(response()->json([
+                'message' => 'Error de validación',
+                'errors' => [
+                    'cylinder' => ['Si capturas eje debes capturar cilindro.']
+                ]
+            ], 422));
+        }
+
+        if (!is_null($effectiveAxis) && ($effectiveAxis < 1 || $effectiveAxis > 180)) {
+            abort(response()->json([
+                'message' => 'Error de validación',
+                'errors' => [
+                    'axis' => ['El eje debe estar entre 1 y 180.']
+                ]
+            ], 422));
+        }
+    }
+
     private function fillImage(Product $p, Request $request): void
     {
         if (!$request->hasFile('image')) {
@@ -74,7 +143,6 @@ class ProductsController extends Controller
         $ext = $file->getClientOriginalExtension() ?: $file->extension() ?: 'jpg';
         $filename = 'products/' . Str::uuid() . '.' . strtolower($ext);
 
-        // Guarda el archivo directamente sin meterlo a la BD
         Storage::disk('local')->putFileAs(
             'products',
             $file,
@@ -85,7 +153,6 @@ class ProductsController extends Controller
         $p->image_filename = $file->getClientOriginalName();
         $p->image_mime = $file->getMimeType();
 
-        // Limpia cualquier blob viejo si existía
         if (property_exists($p, 'image_blob') || array_key_exists('image_blob', $p->getAttributes())) {
             $p->image_blob = null;
         }
@@ -116,6 +183,7 @@ class ProductsController extends Controller
 
             'sphere' => $p->sphere !== null ? (float) $p->sphere : null,
             'cylinder' => $p->cylinder !== null ? (float) $p->cylinder : null,
+            'axis' => $p->axis !== null ? (int) $p->axis : null,
 
             'imageUrl' => !empty($p->image_path)
                 ? url("/api/products/{$p->id}/image")
@@ -156,6 +224,7 @@ class ProductsController extends Controller
                 'p.material_id',
                 'p.sphere',
                 'p.cylinder',
+                'p.axis',
 
                 'p.image_path',
                 'p.image_filename',
@@ -198,6 +267,7 @@ class ProductsController extends Controller
 
                         'sphere' => $r->sphere !== null ? (float) $r->sphere : null,
                         'cylinder' => $r->cylinder !== null ? (float) $r->cylinder : null,
+                        'axis' => $r->axis !== null ? (int) $r->axis : null,
 
                         'imageUrl' => $r->image_path
                             ? url("/api/products/{$r->product_id}/image")
@@ -233,11 +303,14 @@ class ProductsController extends Controller
             'lens_type_id'  => ['nullable', 'integer', 'exists:lens_types,id'],
             'material_id'   => ['nullable', 'integer', 'exists:materials,id'],
 
-            'sphere'   => ['nullable', 'numeric'],
-            'cylinder' => ['nullable', 'numeric', 'lte:0'],
+            'sphere'   => ['nullable', 'numeric', 'between:-40,40'],
+            'cylinder' => ['nullable', 'numeric', 'lt:0'],
+            'axis'     => ['nullable', 'integer', 'between:1,180'],
 
             'image' => ['nullable', 'image', 'max:15360'],
         ]);
+
+        $this->normalizeOpticalFields($data, (int) $data['category_id']);
 
         return DB::transaction(function () use ($data, $request) {
             $p = new Product();
@@ -263,6 +336,7 @@ class ProductsController extends Controller
 
             $p->sphere = $data['sphere'] ?? null;
             $p->cylinder = $data['cylinder'] ?? null;
+            $p->axis = $data['axis'] ?? null;
 
             $p->active = 1;
 
@@ -289,7 +363,7 @@ class ProductsController extends Controller
         $p = Product::whereNull('deleted_at')->findOrFail($id);
 
         $data = $request->validate([
-            'sku' => ['sometimes', 'string', 'max:80', "unique:products,sku,{$p->id}"],
+            'sku' => ['sometimes', 'string', 'max:80', Rule::unique('products', 'sku')->ignore($p->id)],
             'name' => ['sometimes', 'string', 'max:190'],
             'description' => ['nullable', 'string'],
             'category_id' => ['sometimes', 'integer', 'exists:categories,id'],
@@ -303,10 +377,17 @@ class ProductsController extends Controller
             'box_id' => ['nullable', 'integer', 'exists:boxes,id'],
             'lens_type_id' => ['nullable', 'integer', 'exists:lens_types,id'],
             'material_id' => ['nullable', 'integer', 'exists:materials,id'],
-            'sphere' => ['nullable', 'numeric'],
-            'cylinder' => ['nullable', 'numeric', 'lte:0'],
+            'sphere' => ['nullable', 'numeric', 'between:-40,40'],
+            'cylinder' => ['nullable', 'numeric', 'lt:0'],
+            'axis' => ['nullable', 'integer', 'between:1,180'],
             'image' => ['nullable', 'image', 'max:15360'],
         ]);
+
+        $effectiveCategoryId = array_key_exists('category_id', $data)
+            ? (int) $data['category_id']
+            : (int) $p->category_id;
+
+        $this->normalizeOpticalFields($data, $effectiveCategoryId, $p);
 
         if (array_key_exists('sku', $data)) $p->sku = $data['sku'];
         if (array_key_exists('name', $data)) $p->name = $data['name'];
@@ -324,6 +405,17 @@ class ProductsController extends Controller
         if (array_key_exists('material_id', $data)) $p->material_id = $data['material_id'] ? (int) $data['material_id'] : null;
         if (array_key_exists('sphere', $data)) $p->sphere = isset($data['sphere']) ? (float) $data['sphere'] : null;
         if (array_key_exists('cylinder', $data)) $p->cylinder = isset($data['cylinder']) ? (float) $data['cylinder'] : null;
+        if (array_key_exists('axis', $data)) $p->axis = isset($data['axis']) ? (int) $data['axis'] : null;
+
+        if (!$this->isLensCategory((int) $p->category_id)) {
+            $p->supplier_id = null;
+            $p->box_id = null;
+            $p->lens_type_id = null;
+            $p->material_id = null;
+            $p->sphere = null;
+            $p->cylinder = null;
+            $p->axis = null;
+        }
 
         $this->fillImage($p, $request);
         $p->save();
@@ -460,6 +552,7 @@ class ProductsController extends Controller
 
             'sphere' => $p->sphere,
             'cylinder' => $p->cylinder,
+            'axis' => $p->axis,
 
             'imageUrl' => !empty($p->image_path)
                 ? url("/api/products/{$p->id}/image")
