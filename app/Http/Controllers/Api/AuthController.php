@@ -241,7 +241,7 @@ class AuthController extends Controller
             'optica_contacto' => $u->optica_contacto,
             'payment_methods' => $paymentMethods,
         ];
-    }));
+    })); 
 }
 
 
