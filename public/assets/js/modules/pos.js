@@ -1,5 +1,11 @@
 // public/assets/js/pages/pos.js
-// FULL - actualizado para imágenes protegidas y imageUrl absoluta/relativa
+// POS actualizado
+// - tratamientos ya NO se seleccionan al hacer pedido
+// - tratamientos vienen configurados desde el producto
+// - muestra tratamientos en catálogo, detalle y carrito
+// - imágenes protegidas
+// - descuentos por pedido o por producto
+// - stock en DataTable
 
 import { api } from '../services/api.js';
 import { money } from '../utils/helpers.js';
@@ -213,19 +219,11 @@ export async function renderPOS(outlet) {
       }, []);
   };
 
-  const treatmentIdsKey = (arr) => {
-    return normalizeTreatments(arr)
-      .map(x => x.id)
-      .sort((a, b) => a - b)
-      .join(',');
-  };
-
   const makeCartKey = (itemLike) => {
     const pid = Number(itemLike?.id ?? itemLike?.product_id ?? 0);
     const variantId = Number(itemLike?.variant_id ?? 0);
     const axis = itemLike?.axis ?? '';
-    const tKey = treatmentIdsKey(itemLike?.treatments ?? []);
-    return `${pid}::${variantId}::${axis}::${tKey}`;
+    return `${pid}::${variantId}::${axis}`;
   };
 
   const getCartQtyForProduct = (productId) =>
@@ -257,6 +255,7 @@ export async function renderPOS(outlet) {
         const p = r.product || {};
         return {
           ...p,
+          treatments: normalizeTreatments(p.treatments || []),
           category: p.category ?? p.category_name ?? getProductCategoryLabel(p),
           category_code: p.category_code ?? getProductCategoryCode(p),
           category_name: p.category_name ?? getProductCategoryLabel(p),
@@ -268,6 +267,7 @@ export async function renderPOS(outlet) {
     } else {
       products = (Array.isArray(prodData) ? prodData : []).map(p => ({
         ...p,
+        treatments: normalizeTreatments(p.treatments || []),
         category: p.category ?? p.category_name ?? getProductCategoryLabel(p),
         category_code: p.category_code ?? getProductCategoryCode(p),
         category_name: p.category_name ?? getProductCategoryLabel(p),
@@ -279,7 +279,8 @@ export async function renderPOS(outlet) {
     DBG('products loaded', products.map(p => ({
       id: p.id,
       name: p.name,
-      imageUrl: p.imageUrl
+      imageUrl: p.imageUrl,
+      treatments: p.treatments
     })));
   }
 
@@ -288,7 +289,7 @@ export async function renderPOS(outlet) {
     try {
       const { data } = await api.get('/opticas');
       customers = Array.isArray(data) ? data : [];
-    } catch (e) {
+    } catch (_e) {
       customers = [];
     }
   }
@@ -308,7 +309,7 @@ export async function renderPOS(outlet) {
 
       const box = outlet.querySelector('#opticaCustomerBox');
       if (box) box.textContent = opticaUserContext.name || 'Óptica';
-    } catch (e) {
+    } catch (_e) {
       opticaUserContext = { id: null, name: null, optica_id: null };
     }
   }
@@ -486,7 +487,6 @@ export async function renderPOS(outlet) {
               <option value="card">Tarjeta</option>
               <option value="transfer">Transferencia</option>
             </select>
-            <div class="small text-muted mt-1">*Si falla, revisa PAYMENT_METHOD_ID en pos.js</div>
           </div>
 
           ${
@@ -497,7 +497,6 @@ export async function renderPOS(outlet) {
                   <div class="form-control bg-light" id="opticaCustomerBox">
                     ${safe(opticaUserContext.name || 'Óptica')}
                   </div>
-                  <div class="small text-muted mt-1">Se registrará automáticamente como cliente.</div>
                 </div>
               `
               : `
@@ -508,7 +507,6 @@ export async function renderPOS(outlet) {
                   <div id="customerSuggest" class="list-group position-absolute w-100"
                        style="z-index:2000; display:none; max-height:240px; overflow:auto;">
                   </div>
-                  <div class="small text-muted mt-1">Empieza a escribir para ver sugerencias.</div>
                 </div>
               `
           }
@@ -611,6 +609,16 @@ export async function renderPOS(outlet) {
     ensureDataTable();
   }
 
+  const treatmentsHtmlBlock = (arr) => {
+    const rows = normalizeTreatments(arr || []);
+    if (!rows.length) return '';
+    return `
+      <div class="small text-muted mt-1">
+        Tratamientos: <b>${safe(rows.map(x => x.name || `#${x.id}`).join(', '))}</b>
+      </div>
+    `;
+  };
+
   const renderCards = async () => {
     const filtered = (products || []).filter(matchesFilter);
     countEl.textContent = `${filtered.length} producto(s)`;
@@ -658,6 +666,8 @@ export async function renderPOS(outlet) {
                 ${p.type ? `<span>${safe(p.type)}</span>` : ''}
               </div>
 
+              ${treatmentsHtmlBlock(p.treatments)}
+
               <div class="mt-2 d-flex align-items-center justify-content-between">
                 <div class="fw-bold">${money(p.salePrice ?? p.sale_price ?? 0)}</div>
                 <div class="small ${critical ? 'text-danger' : 'text-muted'}">
@@ -698,7 +708,7 @@ export async function renderPOS(outlet) {
     const imgUrl = await getProtectedImageUrl(p);
 
     const graduacionHtml =
-      (catCode === 'MICAS' || catCode === 'LENTES CONTACTO')
+      (catCode === 'MICAS' || catCode === 'LENTES_CONTACTO')
         ? `<div class="mt-3"><div class="fw-semibold">Graduación</div><div class="small text-muted">${fmtGrad(g)}</div></div>`
         : `<div class="mt-3"><div class="fw-semibold">Graduación</div><div class="small text-muted">—</div></div>`;
 
@@ -713,6 +723,22 @@ export async function renderPOS(outlet) {
         <div class="fw-semibold">${money(p.buyPrice ?? p.buy_price ?? 0)}</div>
       </div>
     `;
+
+    const treatmentsHtml = normalizeTreatments(p.treatments || []).length
+      ? `
+        <div class="mt-3">
+          <div class="fw-semibold">Tratamientos</div>
+          <div class="small text-muted">
+            ${safe(normalizeTreatments(p.treatments || []).map(x => x.name || `#${x.id}`).join(', '))}
+          </div>
+        </div>
+      `
+      : `
+        <div class="mt-3">
+          <div class="fw-semibold">Tratamientos</div>
+          <div class="small text-muted">—</div>
+        </div>
+      `;
 
     const html = `
       <div class="text-start">
@@ -759,6 +785,7 @@ export async function renderPOS(outlet) {
           <div class="small text-muted">${desc ? safe(desc) : '—'}</div>
         </div>
 
+        ${treatmentsHtml}
         ${graduacionHtml}
         ${biselHtml}
       </div>
@@ -800,16 +827,6 @@ export async function renderPOS(outlet) {
     return { subtotal, discountAmount, total, orderDiscountPct: 0 };
   };
 
-  const treatmentsHtml = (it) => {
-    const arr = normalizeTreatments(it.treatments || []);
-    if (!arr.length) return '';
-    return `
-      <div class="small text-muted mt-1">
-        Tratamientos: <b>${safe(arr.map(x => x.name || `#${x.id}`).join(', '))}</b>
-      </div>
-    `;
-  };
-
   const renderCart = () => {
     const box = outlet.querySelector('#cartBox');
 
@@ -848,7 +865,7 @@ export async function renderPOS(outlet) {
           <div style="min-width:0;">
             <div class="fw-semibold">${safe(it.name)}</div>
             <div class="small text-muted">${safe(it.sku)} · ${money(it.salePrice ?? it.sale_price ?? 0)} · Disponible: ${available}</div>
-            ${treatmentsHtml(it)}
+            ${treatmentsHtmlBlock(it.treatments)}
             ${available <= CRITICAL_STOCK && available > 0 ? `<div class="small text-danger">Stock crítico</div>` : ``}
             ${itemDisc}
           </div>
@@ -871,77 +888,11 @@ export async function renderPOS(outlet) {
     setCheckoutState();
   };
 
-  async function selectTreatmentsForProduct(p) {
-    if (!isOptica || !isMicaProduct(p)) return [];
-
-    try {
-      const { data } = await api.get(`/products/${Number(p.id)}/treatments`);
-      const rows = Array.isArray(data) ? data : [];
-
-      if (!rows.length) {
-        await Swal.fire({
-          icon: 'info',
-          title: 'Sin tratamientos disponibles',
-          text: 'Esta mica no tiene tratamientos configurados.'
-        });
-        return [];
-      }
-
-      const html = rows.map(t => `
-        <div class="form-check text-start mb-2">
-          <input class="form-check-input js-treatment-check" type="checkbox" value="${Number(t.id)}" id="tr_${Number(t.id)}">
-          <label class="form-check-label" for="tr_${Number(t.id)}">
-            ${safe(t.name || t.code || `Tratamiento ${t.id}`)}
-          </label>
-          ${t.description ? `<div class="small text-muted ms-4">${safe(t.description)}</div>` : ''}
-        </div>
-      `).join('');
-
-      const result = await Swal.fire({
-        title: 'Selecciona tratamientos',
-        html: `<div style="max-height:320px;overflow:auto;text-align:left;">${html}</div>`,
-        showCancelButton: true,
-        confirmButtonText: 'Agregar',
-        cancelButtonText: 'Cancelar',
-        focusConfirm: false,
-        preConfirm: () => {
-          return Array.from(document.querySelectorAll('.js-treatment-check:checked')).map(el => {
-            const id = Number(el.value || 0);
-            const row = rows.find(x => Number(x.id) === id);
-            return {
-              id,
-              name: row?.name || row?.code || `Tratamiento ${id}`
-            };
-          });
-        }
-      });
-
-      if (!result.isConfirmed) return null;
-      return normalizeTreatments(result.value || []);
-    } catch (err) {
-      const msg = err?.response?.data?.message || err?.message || 'No se pudieron cargar tratamientos';
-      await Swal.fire('Error', msg, 'error');
-      return null;
-    }
-  }
-
   const addToCart = async (p) => {
     const available = getAvailable(p.id);
     if (available <= 0) {
       warnNoStock(p.name);
       return false;
-    }
-
-    let selectedTreatments = [];
-
-    if (isOptica && isMicaProduct(p)) {
-      const picked = await selectTreatmentsForProduct(p);
-
-      if (picked === null) {
-        return false;
-      }
-
-      selectedTreatments = picked;
     }
 
     const baseItem = {
@@ -950,7 +901,7 @@ export async function renderPOS(outlet) {
       buyPrice: p.buyPrice ?? p.buy_price ?? 0,
       qty: 1,
       itemDiscountPct: 0,
-      treatments: selectedTreatments,
+      treatments: normalizeTreatments(p.treatments || []),
     };
 
     const cart_key = makeCartKey(baseItem);
@@ -1012,7 +963,7 @@ export async function renderPOS(outlet) {
     };
 
     const renderList = (matches) => {
-      box.innerHTML = matches.map((c, idx) => {
+      box.innerHTML = matches.map((c) => {
         const id = getId(c);
         const name = getName(c);
         const meta = getMeta(c);
@@ -1020,8 +971,7 @@ export async function renderPOS(outlet) {
         return `
           <button type="button"
                   class="list-group-item list-group-item-action"
-                  data-custid="${id ?? ''}"
-                  data-idx="${idx}">
+                  data-custid="${id ?? ''}">
             <div class="fw-semibold">${safe(name || '(Sin nombre)')}</div>
             ${meta ? `<div class="small text-muted">${safe(meta)}</div>` : ''}
           </button>
@@ -1083,7 +1033,7 @@ export async function renderPOS(outlet) {
     if (catBtn) {
       selectedCategory = String(catBtn.dataset.cat || 'ALL');
       renderCategoryButtons();
-      renderCards();
+      await renderCards();
       return;
     }
 
@@ -1130,9 +1080,9 @@ export async function renderPOS(outlet) {
     }
   });
 
-  outlet.querySelector('#posSearch')?.addEventListener('input', (e) => {
+  outlet.querySelector('#posSearch')?.addEventListener('input', async (e) => {
     searchQuery = String(e.target.value || '');
-    renderCards();
+    await renderCards();
   });
 
   if (!isOptica) {
@@ -1226,8 +1176,7 @@ export async function renderPOS(outlet) {
         item_discount_type,
         item_discount_value,
         axis: it.axis ?? null,
-        item_notes: it.item_notes ?? null,
-        treatments: normalizeTreatments(it.treatments || []).map(x => x.id),
+        item_notes: it.item_notes ?? null
       };
     });
 
