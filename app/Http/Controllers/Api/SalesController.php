@@ -6,6 +6,8 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
+//esto es una prueba
+
 class SalesController extends Controller
 {
     public function store(Request $request)
