@@ -64,6 +64,14 @@ class ProductsController extends Controller
         return in_array($code, ['MICAS', 'LENTES_CONTACTO'], true);
     }
 
+    private function isMicasCategory(int $categoryId): bool
+    {
+        $cat = Category::whereNull('deleted_at')->find($categoryId);
+        $code = strtoupper((string) ($cat?->code ?? ''));
+
+        return $code === 'MICAS';
+    }
+
     private function normalizeOpticalFields(array &$data, int $categoryId, ?Product $product = null): void
     {
         $isLens = $this->isLensCategory($categoryId);
@@ -122,6 +130,97 @@ class ProductsController extends Controller
                 ]
             ], 422));
         }
+    }
+
+    private function normalizeTreatments(array $data, int $categoryId): array
+    {
+        $treatments = collect($data['treatments'] ?? [])
+            ->map(fn ($v) => (int) $v)
+            ->filter(fn ($v) => $v > 0)
+            ->unique()
+            ->values()
+            ->all();
+
+        if (!$this->isMicasCategory($categoryId) && !empty($treatments)) {
+            abort(response()->json([
+                'message' => 'Solo las micas pueden llevar tratamientos',
+                'errors' => [
+                    'treatments' => ['Solo los productos de categoría MICAS pueden llevar tratamientos.']
+                ]
+            ], 422));
+        }
+
+        return $treatments;
+    }
+
+    private function syncTreatments(int $productId, array $treatmentIds): void
+    {
+        DB::table('product_treatments')
+            ->where('product_id', $productId)
+            ->delete();
+
+        if (empty($treatmentIds)) {
+            return;
+        }
+
+        $now = now();
+
+        $rows = collect($treatmentIds)->map(function ($treatmentId) use ($productId, $now) {
+            return [
+                'product_id' => $productId,
+                'treatment_id' => (int) $treatmentId,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ];
+        })->all();
+
+        DB::table('product_treatments')->insert($rows);
+    }
+
+    private function getTreatmentsForProducts(array $productIds)
+    {
+        if (empty($productIds)) {
+            return collect();
+        }
+
+        return DB::table('product_treatments as pt')
+            ->join('treatments as t', 't.id', '=', 'pt.treatment_id')
+            ->whereIn('pt.product_id', $productIds)
+            ->select(
+                'pt.product_id',
+                't.id as treatment_id',
+                't.name as treatment_name',
+                't.code as treatment_code'
+            )
+            ->get()
+            ->groupBy('product_id');
+    }
+
+    private function mapTreatments($rows): array
+    {
+        return collect($rows)
+            ->map(fn ($row) => [
+                'id' => (int) $row->treatment_id,
+                'name' => $row->treatment_name,
+                'code' => $row->treatment_code,
+            ])
+            ->values()
+            ->all();
+    }
+
+    private function getTreatmentsForProduct(int $productId): array
+    {
+        $rows = DB::table('product_treatments as pt')
+            ->join('treatments as t', 't.id', '=', 'pt.treatment_id')
+            ->where('pt.product_id', $productId)
+            ->select(
+                't.id as treatment_id',
+                't.name as treatment_name',
+                't.code as treatment_code'
+            )
+            ->get();
+
+        return $this->mapTreatments($rows);
     }
 
     private function fillImage(Product $p, Request $request): void
@@ -185,6 +284,8 @@ class ProductsController extends Controller
             'cylinder' => $p->cylinder !== null ? (float) $p->cylinder : null,
             'axis' => $p->axis !== null ? (int) $p->axis : null,
 
+            'treatments' => $this->getTreatmentsForProduct((int) $p->id),
+
             'imageUrl' => !empty($p->image_path)
                 ? url("/api/products/{$p->id}/image")
                 : null,
@@ -234,8 +335,11 @@ class ProductsController extends Controller
             ])
             ->get();
 
+        $productIds = $rows->pluck('product_id')->map(fn ($v) => (int) $v)->all();
+        $treatmentsByProduct = $this->getTreatmentsForProducts($productIds);
+
         return response()->json(
-            $rows->map(function ($r) {
+            $rows->map(function ($r) use ($treatmentsByProduct) {
                 $stock = (int) ($r->stock ?? 0);
                 $reserved = (int) ($r->reserved ?? 0);
                 $available = max(0, $stock - $reserved);
@@ -268,6 +372,8 @@ class ProductsController extends Controller
                         'sphere' => $r->sphere !== null ? (float) $r->sphere : null,
                         'cylinder' => $r->cylinder !== null ? (float) $r->cylinder : null,
                         'axis' => $r->axis !== null ? (int) $r->axis : null,
+
+                        'treatments' => $this->mapTreatments($treatmentsByProduct->get($r->product_id, [])),
 
                         'imageUrl' => $r->image_path
                             ? url("/api/products/{$r->product_id}/image")
@@ -307,12 +413,16 @@ class ProductsController extends Controller
             'cylinder' => ['nullable', 'numeric', 'lt:0'],
             'axis'     => ['nullable', 'integer', 'between:1,180'],
 
+            'treatments' => ['nullable', 'array'],
+            'treatments.*' => ['integer', 'exists:treatments,id'],
+
             'image' => ['nullable', 'image', 'max:15360'],
         ]);
 
         $this->normalizeOpticalFields($data, (int) $data['category_id']);
+        $treatmentIds = $this->normalizeTreatments($data, (int) $data['category_id']);
 
-        return DB::transaction(function () use ($data, $request) {
+        return DB::transaction(function () use ($data, $request, $treatmentIds) {
             $p = new Product();
 
             $p->sku = $data['sku'];
@@ -351,6 +461,8 @@ class ProductsController extends Controller
                 'updated_at' => now(),
             ]);
 
+            $this->syncTreatments((int) $p->id, $treatmentIds);
+
             return response()->json([
                 'ok' => true,
                 'product' => $this->productResponse($p),
@@ -380,6 +492,10 @@ class ProductsController extends Controller
             'sphere' => ['nullable', 'numeric', 'between:-40,40'],
             'cylinder' => ['nullable', 'numeric', 'lt:0'],
             'axis' => ['nullable', 'integer', 'between:1,180'],
+
+            'treatments' => ['nullable', 'array'],
+            'treatments.*' => ['integer', 'exists:treatments,id'],
+
             'image' => ['nullable', 'image', 'max:15360'],
         ]);
 
@@ -388,6 +504,7 @@ class ProductsController extends Controller
             : (int) $p->category_id;
 
         $this->normalizeOpticalFields($data, $effectiveCategoryId, $p);
+        $treatmentIds = $this->normalizeTreatments($data, $effectiveCategoryId);
 
         if (array_key_exists('sku', $data)) $p->sku = $data['sku'];
         if (array_key_exists('name', $data)) $p->name = $data['name'];
@@ -419,6 +536,12 @@ class ProductsController extends Controller
 
         $this->fillImage($p, $request);
         $p->save();
+
+        if ($this->isMicasCategory((int) $p->category_id)) {
+            $this->syncTreatments((int) $p->id, $treatmentIds);
+        } else {
+            $this->syncTreatments((int) $p->id, []);
+        }
 
         return response()->json([
             'ok' => true,
@@ -462,6 +585,10 @@ class ProductsController extends Controller
         if (!empty($p->image_path) && Storage::disk('local')->exists($p->image_path)) {
             Storage::disk('local')->delete($p->image_path);
         }
+
+        DB::table('product_treatments')
+            ->where('product_id', $p->id)
+            ->delete();
 
         $p->delete();
 
@@ -553,6 +680,8 @@ class ProductsController extends Controller
             'sphere' => $p->sphere,
             'cylinder' => $p->cylinder,
             'axis' => $p->axis,
+
+            'treatments' => $this->getTreatmentsForProduct((int) $p->id),
 
             'imageUrl' => !empty($p->image_path)
                 ? url("/api/products/{$p->id}/image")

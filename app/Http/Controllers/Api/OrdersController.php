@@ -7,88 +7,233 @@ use App\Models\Order;
 use App\Models\OrderItem;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use App\Models\Product;
 
 class OrdersController extends Controller
 {
-    public function index(Request $request)
+    private function treatmentsForProducts(array $productIds)
     {
-        $u = $request->user();
-        $role = $u?->role?->name;
-
-        if (!in_array($role, ['optica', 'admin', 'employee'], true)) {
-            return response()->json(['message' => 'No autorizado'], 403);
+        if (empty($productIds)) {
+            return collect();
         }
 
-        $perPage = (int) $request->query('per_page', 15);
-        $perPage = max(1, min(100, $perPage));
-
-        $q = Order::query()
-            ->whereNull('deleted_at')
-            ->with([
-                'items.product:id,sku,name,category_id,type,sale_price,sphere,cylinder',
-            ])
-            ->orderByDesc('id');
-
-        if ($role === 'optica') {
-            if (!$u->optica_id) {
-                return response()->json([
-                    'current_page' => 1,
-                    'data' => [],
-                    'first_page_url' => null,
-                    'from' => null,
-                    'last_page' => 1,
-                    'last_page_url' => null,
-                    'links' => [],
-                    'next_page_url' => null,
-                    'path' => $request->url(),
-                    'per_page' => $perPage,
-                    'prev_page_url' => null,
-                    'to' => null,
-                    'total' => 0,
-                ]);
-            }
-
-            $q->where('optica_id', $u->optica_id);
-        }
-
-        $orders = $q->paginate($perPage)->appends($request->query());
-
-        $orderIds = collect($orders->items())->pluck('id')->all();
-
-        if (!empty($orderIds)) {
-            $itemsWithTreatments = DB::table('order_items as oi')
-                ->leftJoin('order_item_treatments as oit', 'oit.order_item_id', '=', 'oi.id')
-                ->leftJoin('treatments as t', 't.id', '=', 'oit.treatment_id')
-                ->whereIn('oi.order_id', $orderIds)
-                ->select(
-                    'oi.id as order_item_id',
-                    't.id as treatment_id',
-                    't.name as treatment_name',
-                    't.code as treatment_code'
-                )
-                ->get()
-                ->groupBy('order_item_id');
-
-            $orders->getCollection()->transform(function ($order) use ($itemsWithTreatments) {
-                $order->items->transform(function ($item) use ($itemsWithTreatments) {
-                    $item->treatments = collect($itemsWithTreatments->get($item->id, []))
-                        ->filter(fn ($row) => !empty($row->treatment_id))
-                        ->map(fn ($row) => [
-                            'id' => $row->treatment_id,
-                            'name' => $row->treatment_name,
-                            'code' => $row->treatment_code,
-                        ])
-                        ->values();
-
-                    return $item;
-                });
-
-                return $order;
-            });
-        }
-
-        return response()->json($orders);
+        return DB::table('product_treatments as pt')
+            ->join('treatments as t', 't.id', '=', 'pt.treatment_id')
+            ->whereIn('pt.product_id', $productIds)
+            ->whereNull('pt.deleted_at')
+            ->whereNull('t.deleted_at')
+            ->where('pt.active', 1)
+            ->where('t.active', 1)
+            ->select(
+                'pt.product_id',
+                't.id as treatment_id',
+                't.name as treatment_name',
+                't.code as treatment_code',
+                't.description as treatment_description',
+                'pt.extra_price'
+            )
+            ->get()
+            ->groupBy('product_id');
     }
+
+    private function productDetailsMap(array $productIds)
+    {
+        if (empty($productIds)) {
+            return collect();
+        }
+
+        return DB::table('products as p')
+            ->leftJoin('categories as c', 'c.id', '=', 'p.category_id')
+            ->leftJoin('suppliers as s', 's.id', '=', 'p.supplier_id')
+            ->leftJoin('boxes as b', 'b.id', '=', 'p.box_id')
+            ->leftJoin('lens_types as lt', 'lt.id', '=', 'p.lens_type_id')
+            ->leftJoin('materials as m', 'm.id', '=', 'p.material_id')
+            ->whereIn('p.id', $productIds)
+            ->whereNull('p.deleted_at')
+            ->select([
+                'p.id',
+                'p.sku',
+                'p.name',
+                'p.description',
+                'p.category_id',
+                'p.type',
+                'p.brand',
+                'p.model',
+                'p.material',
+                'p.size',
+                'p.buy_price',
+                'p.sale_price',
+                'p.min_stock',
+                'p.max_stock',
+                'p.supplier_id',
+                'p.box_id',
+                'p.lens_type_id',
+                'p.material_id',
+                'p.sphere',
+                'p.cylinder',
+                'p.axis',
+                'p.image_path',
+
+                'c.code as category_code',
+                'c.name as category_name',
+
+                's.name as supplier_name',
+
+                'b.code as box_code',
+                'b.name as box_name',
+
+                'lt.code as lens_type_code',
+                'lt.name as lens_type_name',
+
+                'm.name as material_name',
+            ])
+            ->get()
+            ->keyBy('id');
+    }
+
+    private function attachProductDetailsToOrders($orders): void
+    {
+        $orderCollection = $orders instanceof \Illuminate\Pagination\LengthAwarePaginator
+            ? $orders->getCollection()
+            : collect([$orders]);
+
+        $productIds = $orderCollection
+            ->flatMap(function ($order) {
+                return collect($order->items ?? [])->pluck('product_id');
+            })
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        $treatmentsByProduct = $this->treatmentsForProducts($productIds);
+        $productDetailsById = $this->productDetailsMap($productIds);
+
+        $orderCollection->transform(function ($order) use ($treatmentsByProduct, $productDetailsById) {
+            $order->items->transform(function ($item) use ($treatmentsByProduct, $productDetailsById) {
+                $pid = (int) $item->product_id;
+                $detail = $productDetailsById->get($pid);
+
+                $treatments = collect($treatmentsByProduct->get($pid, []))
+                    ->filter(fn ($row) => !empty($row->treatment_id))
+                    ->map(fn ($row) => [
+                        'id' => (int) $row->treatment_id,
+                        'name' => $row->treatment_name,
+                        'code' => $row->treatment_code,
+                        'description' => $row->treatment_description,
+                        'extra_price' => (float) ($row->extra_price ?? 0),
+                    ])
+                    ->values();
+
+                if ($detail) {
+                    $productModel = new Product();
+
+                    $productModel->forceFill([
+                        'id' => (int) $detail->id,
+                        'sku' => $detail->sku,
+                        'name' => $detail->name,
+                        'description' => $detail->description,
+
+                        'category_id' => $detail->category_id ? (int) $detail->category_id : null,
+                        'category_code' => $detail->category_code,
+                        'category_name' => $detail->category_name,
+
+                        'type' => $detail->type,
+                        'brand' => $detail->brand,
+                        'model' => $detail->model,
+                        'material' => $detail->material,
+                        'size' => $detail->size,
+
+                        'buy_price' => $detail->buy_price !== null ? (float) $detail->buy_price : null,
+                        'sale_price' => $detail->sale_price !== null ? (float) $detail->sale_price : null,
+                        'min_stock' => $detail->min_stock !== null ? (int) $detail->min_stock : null,
+                        'max_stock' => $detail->max_stock !== null ? (int) $detail->max_stock : null,
+
+                        'supplier_id' => $detail->supplier_id ? (int) $detail->supplier_id : null,
+                        'supplier_name' => $detail->supplier_name,
+
+                        'box_id' => $detail->box_id ? (int) $detail->box_id : null,
+                        'box_code' => $detail->box_code,
+                        'box_name' => $detail->box_name,
+
+                        'lens_type_id' => $detail->lens_type_id ? (int) $detail->lens_type_id : null,
+                        'lens_type_code' => $detail->lens_type_code,
+                        'lens_type_name' => $detail->lens_type_name,
+
+                        'material_id' => $detail->material_id ? (int) $detail->material_id : null,
+                        'material_name' => $detail->material_name,
+
+                        'sphere' => $detail->sphere !== null ? (float) $detail->sphere : null,
+                        'cylinder' => $detail->cylinder !== null ? (float) $detail->cylinder : null,
+                        'axis' => $detail->axis !== null ? (int) $detail->axis : null,
+
+                        'imageUrl' => !empty($detail->image_path)
+                            ? url("/api/products/{$detail->id}/image")
+                            : null,
+                    ]);
+
+                    $productModel->exists = true;
+                    $productModel->setAttribute('treatments', $treatments);
+
+                    $item->unsetRelation('product');
+                    $item->setRelation('product', $productModel);
+                }
+
+                $item->setAttribute('treatments', $treatments);
+
+                return $item;
+            });
+
+            return $order;
+        });
+    }
+
+    public function index(Request $request)
+{
+    $u = $request->user();
+    $role = $u?->role?->name;
+
+    if (!in_array($role, ['optica', 'admin', 'employee'], true)) {
+        return response()->json(['message' => 'No autorizado'], 403);
+    }
+
+    $perPage = (int) $request->query('per_page', 15);
+    $perPage = max(1, min(100, $perPage));
+
+    $q = Order::query()
+        ->whereNull('deleted_at')
+        ->with(['items'])
+        ->orderByDesc('id');
+
+    if ($role === 'optica') {
+        if (!$u->optica_id) {
+            return response()->json([
+                'current_page' => 1,
+                'data' => [],
+                'first_page_url' => null,
+                'from' => null,
+                'last_page' => 1,
+                'last_page_url' => null,
+                'links' => [],
+                'next_page_url' => null,
+                'path' => $request->url(),
+                'per_page' => $perPage,
+                'prev_page_url' => null,
+                'to' => null,
+                'total' => 0,
+            ]);
+        }
+
+        $q->where('optica_id', $u->optica_id);
+    }
+
+    $orders = $q->paginate($perPage)->appends($request->query());
+
+    $this->attachProductDetailsToOrders($orders);
+
+    return response()->json($orders);
+}
 
     public function store(Request $request)
     {
@@ -114,15 +259,13 @@ class OrdersController extends Controller
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
             'items.*.axis' => ['nullable', 'integer'],
             'items.*.item_notes' => ['nullable', 'string'],
-            'items.*.treatments' => ['nullable', 'array'],
-            'items.*.treatments.*' => ['integer', 'exists:treatments,id'],
         ]);
 
         return DB::transaction(function () use ($data, $u) {
             $preparedItems = [];
             $subtotal = 0;
 
-            foreach ($data['items'] as $idx => $it) {
+            foreach ($data['items'] as $it) {
                 $pid = (int) $it['product_id'];
                 $qty = (int) $it['qty'];
 
@@ -147,15 +290,8 @@ class OrdersController extends Controller
                 }
 
                 $product = DB::table('products as p')
-                    ->leftJoin('categories as c', 'c.id', '=', 'p.category_id')
                     ->where('p.id', $pid)
-                    ->select(
-                        'p.id',
-                        'p.category_id',
-                        'p.sale_price',
-                        'c.code as category_code',
-                        'c.name as category_name'
-                    )
+                    ->select('p.id', 'p.sale_price')
                     ->first();
 
                 if (!$product) {
@@ -165,51 +301,6 @@ class OrdersController extends Controller
                             'items' => ["No existe el producto {$pid}"]
                         ]
                     ], 422));
-                }
-
-                $isMica = strtoupper((string) ($product->category_code ?? '')) === 'MICAS';
-
-                $treatments = collect($it['treatments'] ?? [])
-                    ->map(fn ($v) => (int) $v)
-                    ->filter(fn ($v) => $v > 0)
-                    ->unique()
-                    ->values();
-
-                if (!$isMica && $treatments->isNotEmpty()) {
-                    abort(response()->json([
-                        'message' => 'Solo las micas pueden llevar tratamientos',
-                        'errors' => [
-                            "items.{$idx}.treatments" => [
-                                "El producto {$pid} no pertenece a la categoría MICAS."
-                            ]
-                        ]
-                    ], 422));
-                }
-
-                if ($isMica && $treatments->isNotEmpty()) {
-                    $allowed = DB::table('product_treatments')
-                        ->where('product_id', $pid)
-                        ->pluck('treatment_id')
-                        ->map(fn ($v) => (int) $v)
-                        ->all();
-
-                    if (!empty($allowed)) {
-                        $invalid = $treatments
-                            ->reject(fn ($id) => in_array($id, $allowed, true))
-                            ->values()
-                            ->all();
-
-                        if (!empty($invalid)) {
-                            abort(response()->json([
-                                'message' => 'Tratamientos no permitidos para esta mica',
-                                'errors' => [
-                                    "items.{$idx}.treatments" => [
-                                        'Tratamientos inválidos: ' . implode(', ', $invalid)
-                                    ]
-                                ]
-                            ], 422));
-                        }
-                    }
                 }
 
                 $lineTotal = (float) $qty * (float) $it['unit_price'];
@@ -223,7 +314,6 @@ class OrdersController extends Controller
                     'line_total' => $lineTotal,
                     'axis' => $it['axis'] ?? null,
                     'item_notes' => $it['item_notes'] ?? null,
-                    'treatments' => $treatments->all(),
                 ];
             }
 
@@ -239,7 +329,7 @@ class OrdersController extends Controller
             ]);
 
             foreach ($preparedItems as $it) {
-                $orderItem = OrderItem::create([
+                OrderItem::create([
                     'order_id' => $order->id,
                     'product_id' => $it['product_id'],
                     'variant_id' => $it['variant_id'],
@@ -249,16 +339,6 @@ class OrdersController extends Controller
                     'axis' => $it['axis'],
                     'item_notes' => $it['item_notes'],
                 ]);
-
-                foreach ($it['treatments'] as $treatmentId) {
-                    DB::table('order_item_treatments')->insert([
-                        'order_item_id' => $orderItem->id,
-                        'treatment_id' => $treatmentId,
-                        'price' => 0,
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ]);
-                }
 
                 DB::table('inventory')
                     ->where('product_id', $it['product_id'])
@@ -283,35 +363,9 @@ class OrdersController extends Controller
                 }
             }
 
-            $order->load([
-                'items.product:id,sku,name,category_id,type,sale_price,sphere,cylinder'
-            ]);
+            $order->load(['items']);
 
-            $itemsWithTreatments = DB::table('order_items as oi')
-                ->leftJoin('order_item_treatments as oit', 'oit.order_item_id', '=', 'oi.id')
-                ->leftJoin('treatments as t', 't.id', '=', 'oit.treatment_id')
-                ->where('oi.order_id', $order->id)
-                ->select(
-                    'oi.id as order_item_id',
-                    't.id as treatment_id',
-                    't.name as treatment_name',
-                    't.code as treatment_code'
-                )
-                ->get()
-                ->groupBy('order_item_id');
-
-            $order->items->transform(function ($item) use ($itemsWithTreatments) {
-                $item->treatments = collect($itemsWithTreatments->get($item->id, []))
-                    ->filter(fn ($row) => !empty($row->treatment_id))
-                    ->map(fn ($row) => [
-                        'id' => $row->treatment_id,
-                        'name' => $row->treatment_name,
-                        'code' => $row->treatment_code,
-                    ])
-                    ->values();
-
-                return $item;
-            });
+            $this->attachProductDetailsToOrders($order);
 
             return response()->json($order, 201);
         });
@@ -326,133 +380,106 @@ class OrdersController extends Controller
             return response()->json(['message' => 'No autorizado'], 403);
         }
 
-        $order = Order::with([
-            'items.product:id,sku,name,category_id,type,sale_price,sphere,cylinder'
-        ])->findOrFail($id);
+        $order = Order::with(['items'])->findOrFail($id);
 
         if ($role === 'optica' && (int) $order->optica_id !== (int) $u->optica_id) {
             return response()->json(['message' => 'No autorizado'], 403);
         }
 
-        $itemsWithTreatments = DB::table('order_items as oi')
-            ->leftJoin('order_item_treatments as oit', 'oit.order_item_id', '=', 'oi.id')
-            ->leftJoin('treatments as t', 't.id', '=', 'oit.treatment_id')
-            ->where('oi.order_id', $order->id)
-            ->select(
-                'oi.id as order_item_id',
-                't.id as treatment_id',
-                't.name as treatment_name',
-                't.code as treatment_code'
-            )
-            ->get()
-            ->groupBy('order_item_id');
-
-        $order->items->transform(function ($item) use ($itemsWithTreatments) {
-            $item->treatments = collect($itemsWithTreatments->get($item->id, []))
-                ->filter(fn ($row) => !empty($row->treatment_id))
-                ->map(fn ($row) => [
-                    'id' => $row->treatment_id,
-                    'name' => $row->treatment_name,
-                    'code' => $row->treatment_code,
-                ])
-                ->values();
-
-            return $item;
-        });
+        $this->attachProductDetailsToOrders($order);
 
         return response()->json($order);
     }
 
     public function cancel(Request $request, $id)
-{
-    $u = $request->user();
-    $role = $u?->role?->name;
+    {
+        $u = $request->user();
+        $role = $u?->role?->name;
 
-    if (!in_array($role, ['optica', 'admin'], true)) {
-        return response()->json(['message' => 'No autorizado'], 403);
-    }
-
-    return DB::transaction(function () use ($id, $u, $role) {
-        $order = Order::query()
-            ->whereNull('deleted_at')
-            ->lockForUpdate()
-            ->with(['items'])
-            ->findOrFail($id);
-
-        if ($role === 'optica' && (int) $order->optica_id !== (int) $u->optica_id) {
+        if (!in_array($role, ['optica', 'admin'], true)) {
             return response()->json(['message' => 'No autorizado'], 403);
         }
 
-        if ($role === 'optica' && $order->process_status !== 'en_proceso') {
-            return response()->json([
-                'message' => 'La óptica solo puede cancelar cuando el pedido está en proceso',
-                'errors' => ['process_status' => ['Estado no cancelable para óptica']]
-            ], 422);
-        }
-
-        if ($role === 'admin' && $order->process_status !== 'revision') {
-            return response()->json([
-                'message' => 'Admin solo puede cancelar cuando el pedido está en revisión',
-                'errors' => ['process_status' => ['Estado no cancelable para admin']]
-            ], 422);
-        }
-
-        if ($order->process_status === 'cancelado') {
-            return response()->json([
-                'message' => 'El pedido ya está cancelado'
-            ], 422);
-        }
-
-        foreach ($order->items as $it) {
-            $pid = (int) $it->product_id;
-            $qty = (int) $it->qty;
-
-            $inv = DB::table('inventory')
-                ->where('product_id', $pid)
+        return DB::transaction(function () use ($id, $u, $role) {
+            $order = Order::query()
+                ->whereNull('deleted_at')
                 ->lockForUpdate()
-                ->first();
+                ->with(['items'])
+                ->findOrFail($id);
 
-            if (!$inv) {
-                abort(response()->json([
-                    'message' => 'Inventario no encontrado',
-                    'errors' => ['inventory' => ["No existe inventory para product_id={$pid}"]]
-                ], 422));
+            if ($role === 'optica' && (int) $order->optica_id !== (int) $u->optica_id) {
+                return response()->json(['message' => 'No autorizado'], 403);
             }
 
-            DB::table('inventory')
-            ->where('product_id', $pid)
-            ->update([
-                'reserved' => DB::raw('GREATEST(reserved - ' . (int) $qty . ', 0)'),
-                'updated_at' => now(),
-            ]);
-
-            if (DB::getSchemaBuilder()->hasTable('inventory_movements')) {
-                DB::table('inventory_movements')->insert([
-                    'product_id' => $pid,
-                    'variant_id' => $it->variant_id,
-                    'movement_type' => 'unreserve',
-                    'qty' => $qty,
-                    'reference_type' => 'order_cancel',
-                    'reference_id' => $order->id,
-                    'note' => 'Liberación de reserva por cancelación de pedido',
-                    'created_by' => $u->id,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
+            if ($role === 'optica' && $order->process_status !== 'en_proceso') {
+                return response()->json([
+                    'message' => 'La óptica solo puede cancelar cuando el pedido está en proceso',
+                    'errors' => ['process_status' => ['Estado no cancelable para óptica']]
+                ], 422);
             }
-        }
 
-        $order->process_status = 'cancelado';
-        $order->save();
+            if ($role === 'admin' && $order->process_status !== 'revision') {
+                return response()->json([
+                    'message' => 'Admin solo puede cancelar cuando el pedido está en revisión',
+                    'errors' => ['process_status' => ['Estado no cancelable para admin']]
+                ], 422);
+            }
 
-        return response()->json([
-            'ok' => true,
-            'message' => 'Pedido cancelado',
-            'order_id' => $order->id
-        ], 200);
-    });
-}
+            if ($order->process_status === 'cancelado') {
+                return response()->json([
+                    'message' => 'El pedido ya está cancelado'
+                ], 422);
+            }
 
+            foreach ($order->items as $it) {
+                $pid = (int) $it->product_id;
+                $qty = (int) $it->qty;
+
+                $inv = DB::table('inventory')
+                    ->where('product_id', $pid)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$inv) {
+                    abort(response()->json([
+                        'message' => 'Inventario no encontrado',
+                        'errors' => ['inventory' => ["No existe inventory para product_id={$pid}"]]
+                    ], 422));
+                }
+
+                DB::table('inventory')
+                    ->where('product_id', $pid)
+                    ->update([
+                        'reserved' => DB::raw('GREATEST(reserved - ' . (int) $qty . ', 0)'),
+                        'updated_at' => now(),
+                    ]);
+
+                if (DB::getSchemaBuilder()->hasTable('inventory_movements')) {
+                    DB::table('inventory_movements')->insert([
+                        'product_id' => $pid,
+                        'variant_id' => $it->variant_id,
+                        'movement_type' => 'unreserve',
+                        'qty' => $qty,
+                        'reference_type' => 'order_cancel',
+                        'reference_id' => $order->id,
+                        'note' => 'Liberación de reserva por cancelación de pedido',
+                        'created_by' => $u->id,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
+            }
+
+            $order->process_status = 'cancelado';
+            $order->save();
+
+            return response()->json([
+                'ok' => true,
+                'message' => 'Pedido cancelado',
+                'order_id' => $order->id
+            ], 200);
+        });
+    }
 
     public function update(Request $request, $id)
     {
@@ -481,7 +508,6 @@ class OrdersController extends Controller
             $newPayment = array_key_exists('payment_status', $data) ? $data['payment_status'] : $oldPayment;
             $newProcess = array_key_exists('process_status', $data) ? $data['process_status'] : $oldProcess;
 
-            // EMPLOYEE: solo puede tocar process_status
             if ($role === 'employee') {
                 if ($newPayment !== $oldPayment) {
                     return response()->json([
@@ -508,7 +534,6 @@ class OrdersController extends Controller
                 }
             }
 
-            // ADMIN: puede cambiar payment_status
             if ($newPayment !== $oldPayment) {
                 $order->payment_status = $newPayment;
 
@@ -519,9 +544,7 @@ class OrdersController extends Controller
                 }
             }
 
-            // ADMIN y EMPLOYEE: pueden cambiar process_status con reglas
             if ($newProcess !== $oldProcess) {
-                // Si pasa a entregado: baja reserved y baja stock
                 if ($newProcess === 'entregado' && $oldProcess !== 'entregado') {
                     foreach ($order->items as $it) {
                         $pid = (int) $it->product_id;
@@ -553,7 +576,6 @@ class OrdersController extends Controller
                     }
                 }
 
-                // Si sale de entregado a otro estado: reponer stock y reserva
                 if ($oldProcess === 'entregado' && $newProcess !== 'entregado') {
                     foreach ($order->items as $it) {
                         $pid = (int) $it->product_id;
