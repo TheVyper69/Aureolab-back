@@ -1302,4 +1302,4 @@ export async function renderPOS(outlet) {
   }
 
   DBG('renderPOS end');
-}
+} 
