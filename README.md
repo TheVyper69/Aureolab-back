@@ -39,3 +39,4 @@ En `public/assets/js/services/api.js`:
 - Las Ópticas (rol `optica`) solo ven stock dentro de `#/orders` y crean pedidos.
 - El Admin define si cada óptica puede pagar por **transferencia** y/o **efectivo**.
 - Mock login: correo con palabra **optica** para entrar como óptica.
+ 
