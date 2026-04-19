@@ -5,41 +5,127 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Models\OrderItem;
+use App\Models\Product;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use App\Models\Product;
+use Illuminate\Support\Str;
 
 class OrdersController extends Controller
 {
-    private function treatmentsForProducts(array $productIds)
+    private function resolveBiselCategoryId(): int
     {
-        if (empty($productIds)) {
+        $cat = DB::table('categories')
+            ->whereNull('deleted_at')
+            ->where(function ($q) {
+                $q->whereRaw('UPPER(TRIM(code)) = ?', ['BISEL'])
+                  ->orWhereRaw('UPPER(TRIM(name)) = ?', ['BISEL'])
+                  ->orWhereRaw('UPPER(TRIM(name)) LIKE ?', ['%BISEL%']);
+            })
+            ->select('id')
+            ->first();
+
+        if (!$cat) {
+            abort(response()->json([
+                'message' => 'No existe la categoría BISEL.',
+                'errors' => [
+                    'category' => ['Debes crear la categoría BISEL antes de usar biselado personalizado.']
+                ]
+            ], 422));
+        }
+
+        return (int) $cat->id;
+    }
+
+    private function treatmentsForOrderItems(array $orderItemIds)
+    {
+        if (empty($orderItemIds) || !DB::getSchemaBuilder()->hasTable('order_item_treatments')) {
             return collect();
         }
 
-        return DB::table('product_treatments as pt')
-            ->join('treatments as t', 't.id', '=', 'pt.treatment_id')
-            ->whereIn('pt.product_id', $productIds)
-            ->whereNull('pt.deleted_at')
+        return DB::table('order_item_treatments as oit')
+            ->join('treatments as t', 't.id', '=', 'oit.treatment_id')
+            ->whereIn('oit.order_item_id', $orderItemIds)
             ->whereNull('t.deleted_at')
-            ->where('pt.active', 1)
-            ->where('t.active', 1)
             ->select(
-                'pt.product_id',
+                'oit.order_item_id',
                 't.id as treatment_id',
                 't.name as treatment_name',
                 't.code as treatment_code',
                 't.description as treatment_description',
-                'pt.extra_price'
+                'oit.price as extra_price'
             )
             ->get()
-            ->groupBy('product_id');
+            ->groupBy('order_item_id');
+    }
+
+    private function customBiselMap(array $orderItemIds)
+    {
+        if (empty($orderItemIds) || !DB::getSchemaBuilder()->hasTable('order_item_custom_bisel')) {
+            return collect();
+        }
+
+        return DB::table('order_item_custom_bisel as cb')
+            ->leftJoin('lens_types as lt', 'lt.id', '=', 'cb.lens_type_id')
+            ->whereIn('cb.order_item_id', $orderItemIds)
+            ->select([
+                'cb.order_item_id',
+                'cb.reflection',
+                'cb.lens_type_id',
+                'cb.frame_height',
+                'cb.blank_height',
+                'cb.observations',
+                'lt.code as lens_type_code',
+                'lt.name as lens_type_name',
+            ])
+            ->get()
+            ->keyBy('order_item_id');
     }
 
     private function productDetailsMap(array $productIds)
     {
         if (empty($productIds)) {
             return collect();
+        }
+
+        $selects = [
+            'p.id',
+            'p.sku',
+            'p.name',
+            'p.description',
+            'p.category_id',
+            'p.type',
+            'p.brand',
+            'p.model',
+            'p.material',
+            'p.size',
+            'p.buy_price',
+            'p.sale_price',
+            'p.min_stock',
+            'p.max_stock',
+            'p.supplier_id',
+            'p.box_id',
+            'p.lens_type_id',
+            'p.material_id',
+            'p.sphere',
+            'p.cylinder',
+            'p.axis',
+            'p.image_path',
+            'c.code as category_code',
+            'c.name as category_name',
+            's.name as supplier_name',
+            'b.code as box_code',
+            'b.name as box_name',
+            'lt.code as lens_type_code',
+            'lt.name as lens_type_name',
+            'm.name as material_name',
+        ];
+
+        if (DB::getSchemaBuilder()->hasColumn('products', 'is_custom')) {
+            $selects[] = 'p.is_custom';
+        }
+
+        if (DB::getSchemaBuilder()->hasColumn('products', 'show_in_pos')) {
+            $selects[] = 'p.show_in_pos';
         }
 
         return DB::table('products as p')
@@ -50,43 +136,7 @@ class OrdersController extends Controller
             ->leftJoin('materials as m', 'm.id', '=', 'p.material_id')
             ->whereIn('p.id', $productIds)
             ->whereNull('p.deleted_at')
-            ->select([
-                'p.id',
-                'p.sku',
-                'p.name',
-                'p.description',
-                'p.category_id',
-                'p.type',
-                'p.brand',
-                'p.model',
-                'p.material',
-                'p.size',
-                'p.buy_price',
-                'p.sale_price',
-                'p.min_stock',
-                'p.max_stock',
-                'p.supplier_id',
-                'p.box_id',
-                'p.lens_type_id',
-                'p.material_id',
-                'p.sphere',
-                'p.cylinder',
-                'p.axis',
-                'p.image_path',
-
-                'c.code as category_code',
-                'c.name as category_name',
-
-                's.name as supplier_name',
-
-                'b.code as box_code',
-                'b.name as box_name',
-
-                'lt.code as lens_type_code',
-                'lt.name as lens_type_name',
-
-                'm.name as material_name',
-            ])
+            ->select($selects)
             ->get()
             ->keyBy('id');
     }
@@ -107,15 +157,29 @@ class OrdersController extends Controller
             ->values()
             ->all();
 
-        $treatmentsByProduct = $this->treatmentsForProducts($productIds);
+        $orderItemIds = $orderCollection
+            ->flatMap(function ($order) {
+                return collect($order->items ?? [])->pluck('id');
+            })
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
         $productDetailsById = $this->productDetailsMap($productIds);
+        $treatmentsByOrderItem = $this->treatmentsForOrderItems($orderItemIds);
+        $customBiselByOrderItem = $this->customBiselMap($orderItemIds);
 
-        $orderCollection->transform(function ($order) use ($treatmentsByProduct, $productDetailsById) {
-            $order->items->transform(function ($item) use ($treatmentsByProduct, $productDetailsById) {
+        $orderCollection->transform(function ($order) use ($productDetailsById, $treatmentsByOrderItem, $customBiselByOrderItem) {
+            $order->items->transform(function ($item) use ($productDetailsById, $treatmentsByOrderItem, $customBiselByOrderItem) {
                 $pid = (int) $item->product_id;
-                $detail = $productDetailsById->get($pid);
+                $orderItemId = (int) $item->id;
 
-                $treatments = collect($treatmentsByProduct->get($pid, []))
+                $detail = $productDetailsById->get($pid);
+                $customBisel = $customBiselByOrderItem->get($orderItemId);
+
+                $treatments = collect($treatmentsByOrderItem->get($orderItemId, []))
                     ->filter(fn ($row) => !empty($row->treatment_id))
                     ->map(fn ($row) => [
                         'id' => (int) $row->treatment_id,
@@ -168,6 +232,9 @@ class OrdersController extends Controller
                         'cylinder' => $detail->cylinder !== null ? (float) $detail->cylinder : null,
                         'axis' => $detail->axis !== null ? (int) $detail->axis : null,
 
+                        'is_custom' => (int) ($detail->is_custom ?? 0),
+                        'show_in_pos' => (int) ($detail->show_in_pos ?? 1),
+
                         'imageUrl' => !empty($detail->image_path)
                             ? url("/api/products/{$detail->id}/image")
                             : null,
@@ -176,11 +243,35 @@ class OrdersController extends Controller
                     $productModel->exists = true;
                     $productModel->setAttribute('treatments', $treatments);
 
+                    if ($customBisel) {
+                        $productModel->setAttribute('custom_bisel', [
+                            'reflection' => $customBisel->reflection,
+                            'lens_type_id' => $customBisel->lens_type_id ? (int) $customBisel->lens_type_id : null,
+                            'lens_type_code' => $customBisel->lens_type_code,
+                            'lens_type_name' => $customBisel->lens_type_name,
+                            'frame_height' => $customBisel->frame_height !== null ? (float) $customBisel->frame_height : null,
+                            'blank_height' => $customBisel->blank_height !== null ? (float) $customBisel->blank_height : null,
+                            'observations' => $customBisel->observations,
+                        ]);
+                    }
+
                     $item->unsetRelation('product');
                     $item->setRelation('product', $productModel);
                 }
 
                 $item->setAttribute('treatments', $treatments);
+
+                if ($customBisel) {
+                    $item->setAttribute('custom_bisel', [
+                        'reflection' => $customBisel->reflection,
+                        'lens_type_id' => $customBisel->lens_type_id ? (int) $customBisel->lens_type_id : null,
+                        'lens_type_code' => $customBisel->lens_type_code,
+                        'lens_type_name' => $customBisel->lens_type_name,
+                        'frame_height' => $customBisel->frame_height !== null ? (float) $customBisel->frame_height : null,
+                        'blank_height' => $customBisel->blank_height !== null ? (float) $customBisel->blank_height : null,
+                        'observations' => $customBisel->observations,
+                    ]);
+                }
 
                 return $item;
             });
@@ -189,51 +280,123 @@ class OrdersController extends Controller
         });
     }
 
-    public function index(Request $request)
-{
-    $u = $request->user();
-    $role = $u?->role?->name;
+    private function createCustomBiselProduct(array $itemData): int
+    {
+        $categoryId = $this->resolveBiselCategoryId();
 
-    if (!in_array($role, ['optica', 'admin', 'employee'], true)) {
-        return response()->json(['message' => 'No autorizado'], 403);
-    }
+        $lensTypeId = !empty($itemData['lens_type_id']) ? (int) $itemData['lens_type_id'] : null;
+        $reflection = trim((string) ($itemData['reflection'] ?? ''));
+        $observations = trim((string) ($itemData['observations'] ?? ''));
+        $unitPrice = (float) ($itemData['unit_price'] ?? 0);
+        $customName = trim((string) ($itemData['name'] ?? ''));
 
-    $perPage = (int) $request->query('per_page', 15);
-    $perPage = max(1, min(100, $perPage));
-
-    $q = Order::query()
-        ->whereNull('deleted_at')
-        ->with(['items'])
-        ->orderByDesc('id');
-
-    if ($role === 'optica') {
-        if (!$u->optica_id) {
-            return response()->json([
-                'current_page' => 1,
-                'data' => [],
-                'first_page_url' => null,
-                'from' => null,
-                'last_page' => 1,
-                'last_page_url' => null,
-                'links' => [],
-                'next_page_url' => null,
-                'path' => $request->url(),
-                'per_page' => $perPage,
-                'prev_page_url' => null,
-                'to' => null,
-                'total' => 0,
-            ]);
+        $nameParts = [$customName !== '' ? $customName : 'Biselado personalizado'];
+        if ($reflection !== '') {
+            $nameParts[] = $reflection;
         }
 
-        $q->where('optica_id', $u->optica_id);
+        $payload = [
+            'sku' => 'BIS-CUSTOM-' . now()->format('YmdHis') . '-' . strtoupper(Str::random(5)),
+            'name' => implode(' - ', $nameParts),
+            'description' => $observations !== '' ? $observations : 'Biselado personalizado generado desde POS',
+            'category_id' => $categoryId,
+            'type' => 'bisel_personalizado',
+            'material' => null,
+            'buy_price' => 0,
+            'sale_price' => $unitPrice,
+            'min_stock' => 0,
+            'max_stock' => null,
+            'supplier_id' => null,
+            'box_id' => null,
+            'lens_type_id' => $lensTypeId,
+            'material_id' => null,
+            'sphere' => null,
+            'cylinder' => null,
+            'axis' => null,
+            'active' => 1,
+            'created_at' => now(),
+            'updated_at' => now(),
+            'deleted_at' => null,
+        ];
+
+        if (DB::getSchemaBuilder()->hasColumn('products', 'brand')) {
+            $payload['brand'] = null;
+        }
+        if (DB::getSchemaBuilder()->hasColumn('products', 'model')) {
+            $payload['model'] = null;
+        }
+        if (DB::getSchemaBuilder()->hasColumn('products', 'size')) {
+            $payload['size'] = null;
+        }
+        if (DB::getSchemaBuilder()->hasColumn('products', 'is_custom')) {
+            $payload['is_custom'] = 1;
+        }
+        if (DB::getSchemaBuilder()->hasColumn('products', 'show_in_pos')) {
+            $payload['show_in_pos'] = 0;
+        }
+
+        return (int) DB::table('products')->insertGetId($payload);
     }
 
-    $orders = $q->paginate($perPage)->appends($request->query());
+    private function isCustomProductId(int $productId): bool
+    {
+        if (!DB::getSchemaBuilder()->hasColumn('products', 'is_custom')) {
+            return false;
+        }
 
-    $this->attachProductDetailsToOrders($orders);
+        $product = DB::table('products')
+            ->where('id', $productId)
+            ->select('id', 'is_custom')
+            ->first();
 
-    return response()->json($orders);
-}
+        return $product && (int) ($product->is_custom ?? 0) === 1;
+    }
+
+    public function index(Request $request)
+    {
+        $u = $request->user();
+        $role = $u?->role?->name;
+
+        if (!in_array($role, ['optica', 'admin', 'employee'], true)) {
+            return response()->json(['message' => 'No autorizado'], 403);
+        }
+
+        $perPage = (int) $request->query('per_page', 15);
+        $perPage = max(1, min(100, $perPage));
+
+        $q = Order::query()
+            ->whereNull('deleted_at')
+            ->with(['items'])
+            ->orderByDesc('id');
+
+        if ($role === 'optica') {
+            if (!$u->optica_id) {
+                return response()->json([
+                    'current_page' => 1,
+                    'data' => [],
+                    'first_page_url' => null,
+                    'from' => null,
+                    'last_page' => 1,
+                    'last_page_url' => null,
+                    'links' => [],
+                    'next_page_url' => null,
+                    'path' => $request->url(),
+                    'per_page' => $perPage,
+                    'prev_page_url' => null,
+                    'to' => null,
+                    'total' => 0,
+                ]);
+            }
+
+            $q->where('optica_id', $u->optica_id);
+        }
+
+        $orders = $q->paginate($perPage)->appends($request->query());
+
+        $this->attachProductDetailsToOrders($orders);
+
+        return response()->json($orders);
+    }
 
     public function store(Request $request)
     {
@@ -253,67 +416,148 @@ class OrdersController extends Controller
             'notes' => ['nullable', 'string'],
 
             'items' => ['required', 'array', 'min:1'],
-            'items.*.product_id' => ['required', 'integer', 'exists:products,id'],
+
+            'items.*.product_id' => ['nullable', 'integer', 'exists:products,id'],
             'items.*.variant_id' => ['nullable', 'integer'],
             'items.*.qty' => ['required', 'integer', 'min:1'],
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
             'items.*.axis' => ['nullable', 'integer'],
             'items.*.item_notes' => ['nullable', 'string'],
+
+            'items.*.treatments' => ['nullable', 'array'],
+            'items.*.treatments.*' => ['integer', 'exists:treatments,id'],
+
+            'items.*.custom_bisel' => ['nullable', 'boolean'],
+            'items.*.reflection' => ['nullable', 'string', 'max:120'],
+            'items.*.lens_type_id' => ['nullable', 'integer', 'exists:lens_types,id'],
+            'items.*.frame_height' => ['nullable', 'numeric', 'min:0'],
+            'items.*.blank_height' => ['nullable', 'numeric', 'min:0'],
+            'items.*.observations' => ['nullable', 'string'],
+            'items.*.name' => ['nullable', 'string', 'max:190'],
         ]);
 
         return DB::transaction(function () use ($data, $u) {
             $preparedItems = [];
             $subtotal = 0;
 
-            foreach ($data['items'] as $it) {
-                $pid = (int) $it['product_id'];
-                $qty = (int) $it['qty'];
+            foreach ($data['items'] as $idx => $it) {
+                $isCustomBisel = !empty($it['custom_bisel']);
 
-                $inv = DB::table('inventory')
-                    ->where('product_id', $pid)
-                    ->lockForUpdate()
-                    ->first();
+                $qty = (int) ($it['qty'] ?? 1);
+                $unitPrice = (float) ($it['unit_price'] ?? 0);
+                $treatments = collect($it['treatments'] ?? [])
+                    ->map(fn ($v) => (int) $v)
+                    ->filter(fn ($v) => $v > 0)
+                    ->unique()
+                    ->values()
+                    ->all();
 
-                $stock = (int) ($inv->stock ?? 0);
-                $reserved = (int) ($inv->reserved ?? 0);
-                $available = $stock - $reserved;
-
-                if ($available < $qty) {
-                    abort(response()->json([
-                        'message' => 'Stock disponible insuficiente',
-                        'errors' => [
-                            'items' => [
-                                "Producto {$pid}: stock={$stock}, reserved={$reserved}, available={$available}, qty={$qty}"
+                if ($isCustomBisel) {
+                    if ($qty !== 1) {
+                        abort(response()->json([
+                            'message' => 'El biselado personalizado solo puede agregarse una vez por renglón.',
+                            'errors' => [
+                                "items.{$idx}.qty" => ['La cantidad para biselado personalizado debe ser 1.']
                             ]
-                        ]
-                    ], 422));
+                        ], 422));
+                    }
+
+                    if (empty($it['lens_type_id'])) {
+                        abort(response()->json([
+                            'message' => 'Falta tipo de lente.',
+                            'errors' => [
+                                "items.{$idx}.lens_type_id" => ['El tipo de lente es obligatorio para biselado personalizado.']
+                            ]
+                        ], 422));
+                    }
+
+                    if (!isset($it['frame_height']) || !is_numeric($it['frame_height'])) {
+                        abort(response()->json([
+                            'message' => 'Falta altura de armazón.',
+                            'errors' => [
+                                "items.{$idx}.frame_height" => ['La altura de armazón es obligatoria.']
+                            ]
+                        ], 422));
+                    }
+
+                    if (!isset($it['blank_height']) || !is_numeric($it['blank_height'])) {
+                        abort(response()->json([
+                            'message' => 'Falta altura de oblea.',
+                            'errors' => [
+                                "items.{$idx}.blank_height" => ['La altura de la oblea es obligatoria.']
+                            ]
+                        ], 422));
+                    }
+
+                    $pid = $this->createCustomBiselProduct($it);
+                } else {
+                    $pid = (int) ($it['product_id'] ?? 0);
+
+                    if (!$pid) {
+                        abort(response()->json([
+                            'message' => 'Producto inválido.',
+                            'errors' => [
+                                "items.{$idx}.product_id" => ['Debes enviar un product_id válido.']
+                            ]
+                        ], 422));
+                    }
+
+                    $inv = DB::table('inventory')
+                        ->where('product_id', $pid)
+                        ->lockForUpdate()
+                        ->first();
+
+                    $stock = (int) ($inv->stock ?? 0);
+                    $reserved = (int) ($inv->reserved ?? 0);
+                    $available = $stock - $reserved;
+
+                    if ($available < $qty) {
+                        abort(response()->json([
+                            'message' => 'Stock disponible insuficiente',
+                            'errors' => [
+                                'items' => [
+                                    "Producto {$pid}: stock={$stock}, reserved={$reserved}, available={$available}, qty={$qty}"
+                                ]
+                            ]
+                        ], 422));
+                    }
+
+                    $product = DB::table('products as p')
+                        ->where('p.id', $pid)
+                        ->whereNull('p.deleted_at')
+                        ->select('p.id', 'p.sale_price')
+                        ->first();
+
+                    if (!$product) {
+                        abort(response()->json([
+                            'message' => 'Producto no encontrado',
+                            'errors' => [
+                                'items' => ["No existe el producto {$pid}"]
+                            ]
+                        ], 422));
+                    }
                 }
 
-                $product = DB::table('products as p')
-                    ->where('p.id', $pid)
-                    ->select('p.id', 'p.sale_price')
-                    ->first();
-
-                if (!$product) {
-                    abort(response()->json([
-                        'message' => 'Producto no encontrado',
-                        'errors' => [
-                            'items' => ["No existe el producto {$pid}"]
-                        ]
-                    ], 422));
-                }
-
-                $lineTotal = (float) $qty * (float) $it['unit_price'];
+                $lineTotal = $qty * $unitPrice;
                 $subtotal += $lineTotal;
 
                 $preparedItems[] = [
                     'product_id' => $pid,
                     'variant_id' => $it['variant_id'] ?? null,
                     'qty' => $qty,
-                    'unit_price' => (float) $it['unit_price'],
+                    'unit_price' => $unitPrice,
                     'line_total' => $lineTotal,
                     'axis' => $it['axis'] ?? null,
                     'item_notes' => $it['item_notes'] ?? null,
+                    'treatments' => $treatments,
+                    'custom_bisel' => $isCustomBisel,
+                    'custom_bisel_detail' => $isCustomBisel ? [
+                        'reflection' => $it['reflection'] ?? null,
+                        'lens_type_id' => $it['lens_type_id'] ?? null,
+                        'frame_height' => $it['frame_height'] ?? null,
+                        'blank_height' => $it['blank_height'] ?? null,
+                        'observations' => $it['observations'] ?? null,
+                    ] : null,
                 ];
             }
 
@@ -329,7 +573,7 @@ class OrdersController extends Controller
             ]);
 
             foreach ($preparedItems as $it) {
-                OrderItem::create([
+                $orderItem = OrderItem::create([
                     'order_id' => $order->id,
                     'product_id' => $it['product_id'],
                     'variant_id' => $it['variant_id'],
@@ -340,26 +584,53 @@ class OrdersController extends Controller
                     'item_notes' => $it['item_notes'],
                 ]);
 
-                DB::table('inventory')
-                    ->where('product_id', $it['product_id'])
-                    ->update([
-                        'reserved' => DB::raw('reserved + ' . (int) $it['qty']),
-                        'updated_at' => now(),
-                    ]);
+                if (!empty($it['treatments']) && DB::getSchemaBuilder()->hasTable('order_item_treatments')) {
+                    foreach ($it['treatments'] as $treatmentId) {
+                        DB::table('order_item_treatments')->insert([
+                            'order_item_id' => $orderItem->id,
+                            'treatment_id' => $treatmentId,
+                            'price' => 0,
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                    }
+                }
 
-                if (DB::getSchemaBuilder()->hasTable('inventory_movements')) {
-                    DB::table('inventory_movements')->insert([
-                        'product_id' => $it['product_id'],
-                        'variant_id' => $it['variant_id'],
-                        'movement_type' => 'reserve',
-                        'qty' => $it['qty'],
-                        'reference_type' => 'order',
-                        'reference_id' => $order->id,
-                        'note' => 'Reserva por pedido',
-                        'created_by' => $u->id,
+                if (!empty($it['custom_bisel']) && !empty($it['custom_bisel_detail']) && DB::getSchemaBuilder()->hasTable('order_item_custom_bisel')) {
+                    DB::table('order_item_custom_bisel')->insert([
+                        'order_item_id' => $orderItem->id,
+                        'reflection' => $it['custom_bisel_detail']['reflection'] ?? null,
+                        'lens_type_id' => !empty($it['custom_bisel_detail']['lens_type_id']) ? (int) $it['custom_bisel_detail']['lens_type_id'] : null,
+                        'frame_height' => isset($it['custom_bisel_detail']['frame_height']) ? (float) $it['custom_bisel_detail']['frame_height'] : null,
+                        'blank_height' => isset($it['custom_bisel_detail']['blank_height']) ? (float) $it['custom_bisel_detail']['blank_height'] : null,
+                        'observations' => $it['custom_bisel_detail']['observations'] ?? null,
                         'created_at' => now(),
                         'updated_at' => now(),
                     ]);
+                }
+
+                if (empty($it['custom_bisel'])) {
+                    DB::table('inventory')
+                        ->where('product_id', $it['product_id'])
+                        ->update([
+                            'reserved' => DB::raw('reserved + ' . (int) $it['qty']),
+                            'updated_at' => now(),
+                        ]);
+
+                    if (DB::getSchemaBuilder()->hasTable('inventory_movements')) {
+                        DB::table('inventory_movements')->insert([
+                            'product_id' => $it['product_id'],
+                            'variant_id' => $it['variant_id'],
+                            'movement_type' => 'reserve',
+                            'qty' => $it['qty'],
+                            'reference_type' => 'order',
+                            'reference_id' => $order->id,
+                            'note' => 'Reserva por pedido',
+                            'created_by' => $u->id,
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                    }
                 }
             }
 
@@ -432,6 +703,10 @@ class OrdersController extends Controller
             }
 
             foreach ($order->items as $it) {
+                if ($this->isCustomProductId((int) $it->product_id)) {
+                    continue;
+                }
+
                 $pid = (int) $it->product_id;
                 $qty = (int) $it->qty;
 
@@ -547,6 +822,10 @@ class OrdersController extends Controller
             if ($newProcess !== $oldProcess) {
                 if ($newProcess === 'entregado' && $oldProcess !== 'entregado') {
                     foreach ($order->items as $it) {
+                        if ($this->isCustomProductId((int) $it->product_id)) {
+                            continue;
+                        }
+
                         $pid = (int) $it->product_id;
                         $qty = (int) $it->qty;
 
@@ -578,6 +857,10 @@ class OrdersController extends Controller
 
                 if ($oldProcess === 'entregado' && $newProcess !== 'entregado') {
                     foreach ($order->items as $it) {
+                        if ($this->isCustomProductId((int) $it->product_id)) {
+                            continue;
+                        }
+
                         $pid = (int) $it->product_id;
                         $qty = (int) $it->qty;
 

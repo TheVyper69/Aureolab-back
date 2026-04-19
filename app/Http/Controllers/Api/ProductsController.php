@@ -7,6 +7,7 @@ use App\Models\Category;
 use App\Models\Product;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -54,6 +55,57 @@ class ProductsController extends Controller
         }
 
         return (int) $cat->id;
+    }
+
+    private function hasProductColumn(string $column): bool
+    {
+        static $cache = [];
+
+        if (!array_key_exists($column, $cache)) {
+            $cache[$column] = Schema::hasColumn('products', $column);
+        }
+
+        return $cache[$column];
+    }
+
+    private function applyVisibleProductsScope($query)
+    {
+        $query->whereNull('p.deleted_at')
+              ->where('p.active', 1);
+
+        if ($this->hasProductColumn('show_in_pos')) {
+            $query->where('p.show_in_pos', 1);
+        }
+
+        if ($this->hasProductColumn('is_custom_order')) {
+            $query->where('p.is_custom_order', 0);
+        }
+
+        if ($this->hasProductColumn('is_temporary_order_item')) {
+            $query->where('p.is_temporary_order_item', 0);
+        }
+
+        return $query;
+    }
+
+    private function applyVisibleProductsScopeModel($query)
+    {
+        $query->whereNull('deleted_at')
+              ->where('active', 1);
+
+        if ($this->hasProductColumn('show_in_pos')) {
+            $query->where('show_in_pos', 1);
+        }
+
+        if ($this->hasProductColumn('is_custom_order')) {
+            $query->where('is_custom_order', 0);
+        }
+
+        if ($this->hasProductColumn('is_temporary_order_item')) {
+            $query->where('is_temporary_order_item', 0);
+        }
+
+        return $query;
     }
 
     private function isLensCategory(int $categoryId): bool
@@ -259,7 +311,7 @@ class ProductsController extends Controller
 
     private function productResponse(Product $p): array
     {
-        return [
+        $response = [
             'id' => $p->id,
             'sku' => $p->sku,
             'name' => $p->name,
@@ -292,15 +344,31 @@ class ProductsController extends Controller
 
             'active' => (bool) $p->active,
         ];
+
+        if ($this->hasProductColumn('show_in_pos')) {
+            $response['show_in_pos'] = (bool) ($p->show_in_pos ?? true);
+        }
+
+        if ($this->hasProductColumn('is_custom_order')) {
+            $response['is_custom_order'] = (bool) ($p->is_custom_order ?? false);
+        }
+
+        if ($this->hasProductColumn('is_temporary_order_item')) {
+            $response['is_temporary_order_item'] = (bool) ($p->is_temporary_order_item ?? false);
+        }
+
+        return $response;
     }
 
     public function index()
     {
-        $rows = DB::table('inventory as i')
+        $query = DB::table('inventory as i')
             ->join('products as p', 'p.id', '=', 'i.product_id')
-            ->leftJoin('categories as c', 'c.id', '=', 'p.category_id')
-            ->whereNull('p.deleted_at')
-            ->where('p.active', 1)
+            ->leftJoin('categories as c', 'c.id', '=', 'p.category_id');
+
+        $this->applyVisibleProductsScope($query);
+
+        $rows = $query
             ->orderBy('p.name')
             ->select([
                 'i.product_id',
@@ -389,7 +457,7 @@ class ProductsController extends Controller
 
     public function store(Request $request)
     {
-        $data = $request->validate([
+        $rules = [
             'sku' => ['required', 'string', 'max:80', 'unique:products,sku'],
             'name' => ['required', 'string', 'max:190'],
             'description' => ['nullable', 'string'],
@@ -417,7 +485,21 @@ class ProductsController extends Controller
             'treatments.*' => ['integer', 'exists:treatments,id'],
 
             'image' => ['nullable', 'image', 'max:15360'],
-        ]);
+        ];
+
+        if ($this->hasProductColumn('show_in_pos')) {
+            $rules['show_in_pos'] = ['nullable', 'boolean'];
+        }
+
+        if ($this->hasProductColumn('is_custom_order')) {
+            $rules['is_custom_order'] = ['nullable', 'boolean'];
+        }
+
+        if ($this->hasProductColumn('is_temporary_order_item')) {
+            $rules['is_temporary_order_item'] = ['nullable', 'boolean'];
+        }
+
+        $data = $request->validate($rules);
 
         $this->normalizeOpticalFields($data, (int) $data['category_id']);
         $treatmentIds = $this->normalizeTreatments($data, (int) $data['category_id']);
@@ -450,6 +532,24 @@ class ProductsController extends Controller
 
             $p->active = 1;
 
+            if ($this->hasProductColumn('show_in_pos')) {
+                $p->show_in_pos = array_key_exists('show_in_pos', $data)
+                    ? (int) ((bool) $data['show_in_pos'])
+                    : 1;
+            }
+
+            if ($this->hasProductColumn('is_custom_order')) {
+                $p->is_custom_order = array_key_exists('is_custom_order', $data)
+                    ? (int) ((bool) $data['is_custom_order'])
+                    : 0;
+            }
+
+            if ($this->hasProductColumn('is_temporary_order_item')) {
+                $p->is_temporary_order_item = array_key_exists('is_temporary_order_item', $data)
+                    ? (int) ((bool) $data['is_temporary_order_item'])
+                    : 0;
+            }
+
             $this->fillImage($p, $request);
             $p->save();
 
@@ -474,7 +574,7 @@ class ProductsController extends Controller
     {
         $p = Product::whereNull('deleted_at')->findOrFail($id);
 
-        $data = $request->validate([
+        $rules = [
             'sku' => ['sometimes', 'string', 'max:80', Rule::unique('products', 'sku')->ignore($p->id)],
             'name' => ['sometimes', 'string', 'max:190'],
             'description' => ['nullable', 'string'],
@@ -497,7 +597,21 @@ class ProductsController extends Controller
             'treatments.*' => ['integer', 'exists:treatments,id'],
 
             'image' => ['nullable', 'image', 'max:15360'],
-        ]);
+        ];
+
+        if ($this->hasProductColumn('show_in_pos')) {
+            $rules['show_in_pos'] = ['nullable', 'boolean'];
+        }
+
+        if ($this->hasProductColumn('is_custom_order')) {
+            $rules['is_custom_order'] = ['nullable', 'boolean'];
+        }
+
+        if ($this->hasProductColumn('is_temporary_order_item')) {
+            $rules['is_temporary_order_item'] = ['nullable', 'boolean'];
+        }
+
+        $data = $request->validate($rules);
 
         $effectiveCategoryId = array_key_exists('category_id', $data)
             ? (int) $data['category_id']
@@ -523,6 +637,18 @@ class ProductsController extends Controller
         if (array_key_exists('sphere', $data)) $p->sphere = isset($data['sphere']) ? (float) $data['sphere'] : null;
         if (array_key_exists('cylinder', $data)) $p->cylinder = isset($data['cylinder']) ? (float) $data['cylinder'] : null;
         if (array_key_exists('axis', $data)) $p->axis = isset($data['axis']) ? (int) $data['axis'] : null;
+
+        if ($this->hasProductColumn('show_in_pos') && array_key_exists('show_in_pos', $data)) {
+            $p->show_in_pos = (int) ((bool) $data['show_in_pos']);
+        }
+
+        if ($this->hasProductColumn('is_custom_order') && array_key_exists('is_custom_order', $data)) {
+            $p->is_custom_order = (int) ((bool) $data['is_custom_order']);
+        }
+
+        if ($this->hasProductColumn('is_temporary_order_item') && array_key_exists('is_temporary_order_item', $data)) {
+            $p->is_temporary_order_item = (int) ((bool) $data['is_temporary_order_item']);
+        }
 
         if (!$this->isLensCategory((int) $p->category_id)) {
             $p->supplier_id = null;
@@ -689,6 +815,18 @@ class ProductsController extends Controller
 
             'active' => (bool) $p->active,
             'has_image' => !empty($p->image_path),
+
+            'show_in_pos' => $this->hasProductColumn('show_in_pos')
+                ? (bool) ($p->show_in_pos ?? true)
+                : true,
+
+            'is_custom_order' => $this->hasProductColumn('is_custom_order')
+                ? (bool) ($p->is_custom_order ?? false)
+                : false,
+
+            'is_temporary_order_item' => $this->hasProductColumn('is_temporary_order_item')
+                ? (bool) ($p->is_temporary_order_item ?? false)
+                : false,
         ]);
     }
 }
