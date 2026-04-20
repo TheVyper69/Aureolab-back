@@ -246,6 +246,9 @@ class OrdersController extends Controller
                     if ($customBisel) {
                         $productModel->setAttribute('custom_bisel', [
                             'reflection' => $customBisel->reflection,
+                            'sphere' => $detail->sphere !== null ? (float) $detail->sphere : null,
+                            'cylinder' => $detail->cylinder !== null ? (float) $detail->cylinder : null,
+                            'axis' => $detail->axis !== null ? (int) $detail->axis : null,
                             'lens_type_id' => $customBisel->lens_type_id ? (int) $customBisel->lens_type_id : null,
                             'lens_type_code' => $customBisel->lens_type_code,
                             'lens_type_name' => $customBisel->lens_type_name,
@@ -264,6 +267,9 @@ class OrdersController extends Controller
                 if ($customBisel) {
                     $item->setAttribute('custom_bisel', [
                         'reflection' => $customBisel->reflection,
+                        'sphere' => $detail && $detail->sphere !== null ? (float) $detail->sphere : null,
+                        'cylinder' => $detail && $detail->cylinder !== null ? (float) $detail->cylinder : null,
+                        'axis' => $detail && $detail->axis !== null ? (int) $detail->axis : null,
                         'lens_type_id' => $customBisel->lens_type_id ? (int) $customBisel->lens_type_id : null,
                         'lens_type_code' => $customBisel->lens_type_code,
                         'lens_type_name' => $customBisel->lens_type_name,
@@ -290,6 +296,18 @@ class OrdersController extends Controller
         $unitPrice = (float) ($itemData['unit_price'] ?? 0);
         $customName = trim((string) ($itemData['name'] ?? ''));
 
+        $sphere = array_key_exists('sphere', $itemData) && $itemData['sphere'] !== null && $itemData['sphere'] !== ''
+            ? (float) $itemData['sphere']
+            : null;
+
+        $cylinder = array_key_exists('cylinder', $itemData) && $itemData['cylinder'] !== null && $itemData['cylinder'] !== ''
+            ? (float) $itemData['cylinder']
+            : null;
+
+        $axis = array_key_exists('axis', $itemData) && $itemData['axis'] !== null && $itemData['axis'] !== ''
+            ? (int) $itemData['axis']
+            : null;
+
         $nameParts = [$customName !== '' ? $customName : 'Biselado personalizado'];
         if ($reflection !== '') {
             $nameParts[] = $reflection;
@@ -310,9 +328,9 @@ class OrdersController extends Controller
             'box_id' => null,
             'lens_type_id' => $lensTypeId,
             'material_id' => null,
-            'sphere' => null,
-            'cylinder' => null,
-            'axis' => null,
+            'sphere' => $sphere,
+            'cylinder' => $cylinder,
+            'axis' => $axis,
             'active' => 1,
             'created_at' => now(),
             'updated_at' => now(),
@@ -434,6 +452,10 @@ class OrdersController extends Controller
             'items.*.blank_height' => ['nullable', 'numeric', 'min:0'],
             'items.*.observations' => ['nullable', 'string'],
             'items.*.name' => ['nullable', 'string', 'max:190'],
+
+            'items.*.sphere' => ['nullable', 'numeric', 'between:-40,40'],
+            'items.*.cylinder' => ['nullable', 'numeric', 'lt:0'],
+            'items.*.axis' => ['nullable', 'integer', 'between:1,180'],
         ]);
 
         return DB::transaction(function () use ($data, $u) {
@@ -485,6 +507,54 @@ class OrdersController extends Controller
                             'message' => 'Falta altura de oblea.',
                             'errors' => [
                                 "items.{$idx}.blank_height" => ['La altura de la oblea es obligatoria.']
+                            ]
+                        ], 422));
+                    }
+
+                    $sphere = array_key_exists('sphere', $it) && $it['sphere'] !== null && $it['sphere'] !== ''
+                        ? (float) $it['sphere']
+                        : null;
+
+                    $cylinder = array_key_exists('cylinder', $it) && $it['cylinder'] !== null && $it['cylinder'] !== ''
+                        ? (float) $it['cylinder']
+                        : null;
+
+                    $axis = array_key_exists('axis', $it) && $it['axis'] !== null && $it['axis'] !== ''
+                        ? (int) $it['axis']
+                        : null;
+
+                    if ($cylinder !== null && $cylinder >= 0) {
+                        abort(response()->json([
+                            'message' => 'Error de validación',
+                            'errors' => [
+                                "items.{$idx}.cylinder" => ['El cilindro debe ser negativo y no puede ser 0.']
+                            ]
+                        ], 422));
+                    }
+
+                    if ($cylinder !== null && $axis === null) {
+                        abort(response()->json([
+                            'message' => 'Error de validación',
+                            'errors' => [
+                                "items.{$idx}.axis" => ['Si capturas cilindro debes capturar el eje.']
+                            ]
+                        ], 422));
+                    }
+
+                    if ($cylinder === null && $axis !== null) {
+                        abort(response()->json([
+                            'message' => 'Error de validación',
+                            'errors' => [
+                                "items.{$idx}.cylinder" => ['Si capturas eje debes capturar cilindro.']
+                            ]
+                        ], 422));
+                    }
+
+                    if ($axis !== null && ($axis < 1 || $axis > 180)) {
+                        abort(response()->json([
+                            'message' => 'Error de validación',
+                            'errors' => [
+                                "items.{$idx}.axis" => ['El eje debe estar entre 1 y 180.']
                             ]
                         ], 422));
                     }
