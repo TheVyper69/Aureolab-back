@@ -140,5 +140,26 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/categories/{id}', [CategoriesController::class, 'update']);
         Route::delete('/categories/{id}', [CategoriesController::class, 'destroy']);
 
+        // Lens types
+        Route::post('/lens-types', [LensTypeController::class, 'store']);
+        Route::put('/lens-types/{id}', [LensTypeController::class, 'update']);
+        Route::delete('/lens-types/{id}', [LensTypeController::class, 'destroy']);
+
+        // Materials
+        Route::post('/materials', [MaterialController::class, 'store']);
+        Route::put('/materials/{id}', [MaterialController::class, 'update']);
+        Route::delete('/materials/{id}', [MaterialController::class, 'destroy']);
+        Route::get('/materials/tipos-material', [MaterialController::class, 'show']);
+
+        // Suppliers
+        Route::post('/suppliers', [SupplierController::class, 'store']);
+        Route::put('/suppliers/{id}', [SupplierController::class, 'update']);
+        Route::delete('/suppliers/{id}', [SupplierController::class, 'destroy']);
+
+        // Boxes
+        Route::post('/boxes', [BoxController::class, 'store']);
+        Route::put('/boxes/{id}', [BoxController::class, 'update']);
+        Route::delete('/boxes/{id}', [BoxController::class, 'destroy']);
+
     });
 });
