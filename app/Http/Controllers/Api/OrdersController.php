@@ -12,14 +12,24 @@ use Illuminate\Support\Str;
 
 class OrdersController extends Controller
 {
+    private function hasColumn(string $table, string $column): bool
+    {
+        return DB::getSchemaBuilder()->hasColumn($table, $column);
+    }
+
+    private function hasTable(string $table): bool
+    {
+        return DB::getSchemaBuilder()->hasTable($table);
+    }
+
     private function resolveBiselCategoryId(): int
     {
         $cat = DB::table('categories')
             ->whereNull('deleted_at')
             ->where(function ($q) {
                 $q->whereRaw('UPPER(TRIM(code)) = ?', ['BISEL'])
-                  ->orWhereRaw('UPPER(TRIM(name)) = ?', ['BISEL'])
-                  ->orWhereRaw('UPPER(TRIM(name)) LIKE ?', ['%BISEL%']);
+                    ->orWhereRaw('UPPER(TRIM(name)) = ?', ['BISEL'])
+                    ->orWhereRaw('UPPER(TRIM(name)) LIKE ?', ['%BISEL%']);
             })
             ->select('id')
             ->first();
@@ -36,9 +46,96 @@ class OrdersController extends Controller
         return (int) $cat->id;
     }
 
+    private function formatRefractionText(?float $sphere, ?float $cylinder, ?int $axis): ?string
+    {
+        $parts = [];
+
+        if (!is_null($sphere)) {
+            $parts[] = 'Esfera: ' . number_format($sphere, 2, '.', '');
+        }
+
+        if (!is_null($cylinder)) {
+            $parts[] = 'Cilindro: ' . number_format($cylinder, 2, '.', '');
+        }
+
+        if (!is_null($axis)) {
+            $parts[] = 'Eje: ' . $axis;
+        }
+
+        return count($parts) ? implode(' · ', $parts) : null;
+    }
+
+    private function validateCustomRefraction(array $itemData, int $idx): void
+    {
+        $sphereRaw = $itemData['sphere'] ?? null;
+        $cylinderRaw = $itemData['cylinder'] ?? null;
+        $axisRaw = $itemData['axis'] ?? null;
+
+        $hasSphere = !is_null($sphereRaw) && $sphereRaw !== '';
+        $hasCylinder = !is_null($cylinderRaw) && $cylinderRaw !== '';
+        $hasAxis = !is_null($axisRaw) && $axisRaw !== '';
+
+        if ($hasSphere) {
+            $sphere = (float) $sphereRaw;
+
+            if ($sphere < -40 || $sphere > 40) {
+                abort(response()->json([
+                    'message' => 'Error de validación',
+                    'errors' => [
+                        "items.{$idx}.sphere" => ['La esfera debe estar entre -40 y 40.']
+                    ]
+                ], 422));
+            }
+        }
+
+        if ($hasCylinder) {
+            $cylinder = (float) $cylinderRaw;
+
+            if ($cylinder >= 0) {
+                abort(response()->json([
+                    'message' => 'Error de validación',
+                    'errors' => [
+                        "items.{$idx}.cylinder" => ['El cilindro debe ser negativo y no puede ser 0.']
+                    ]
+                ], 422));
+            }
+
+            if (!$hasAxis) {
+                abort(response()->json([
+                    'message' => 'Error de validación',
+                    'errors' => [
+                        "items.{$idx}.axis" => ['Si capturas cilindro debes capturar el eje.']
+                    ]
+                ], 422));
+            }
+        }
+
+        if (!$hasCylinder && $hasAxis) {
+            abort(response()->json([
+                'message' => 'Error de validación',
+                'errors' => [
+                    "items.{$idx}.cylinder" => ['Si capturas eje debes capturar cilindro.']
+                ]
+            ], 422));
+        }
+
+        if ($hasAxis) {
+            $axis = (int) $axisRaw;
+
+            if ($axis < 1 || $axis > 180) {
+                abort(response()->json([
+                    'message' => 'Error de validación',
+                    'errors' => [
+                        "items.{$idx}.axis" => ['El eje debe estar entre 1 y 180.']
+                    ]
+                ], 422));
+            }
+        }
+    }
+
     private function treatmentsForOrderItems(array $orderItemIds)
     {
-        if (empty($orderItemIds) || !DB::getSchemaBuilder()->hasTable('order_item_treatments')) {
+        if (empty($orderItemIds) || !$this->hasTable('order_item_treatments')) {
             return collect();
         }
 
@@ -60,7 +157,7 @@ class OrdersController extends Controller
 
     private function customBiselMap(array $orderItemIds)
     {
-        if (empty($orderItemIds) || !DB::getSchemaBuilder()->hasTable('order_item_custom_bisel')) {
+        if (empty($orderItemIds) || !$this->hasTable('order_item_custom_bisel')) {
             return collect();
         }
 
@@ -94,10 +191,7 @@ class OrdersController extends Controller
             'p.description',
             'p.category_id',
             'p.type',
-            'p.brand',
-            'p.model',
             'p.material',
-            'p.size',
             'p.buy_price',
             'p.sale_price',
             'p.min_stock',
@@ -110,21 +204,38 @@ class OrdersController extends Controller
             'p.cylinder',
             'p.axis',
             'p.image_path',
+
             'c.code as category_code',
             'c.name as category_name',
+
             's.name as supplier_name',
+
             'b.code as box_code',
             'b.name as box_name',
+
             'lt.code as lens_type_code',
             'lt.name as lens_type_name',
+
             'm.name as material_name',
         ];
 
-        if (DB::getSchemaBuilder()->hasColumn('products', 'is_custom')) {
+        if ($this->hasColumn('products', 'brand')) {
+            $selects[] = 'p.brand';
+        }
+
+        if ($this->hasColumn('products', 'model')) {
+            $selects[] = 'p.model';
+        }
+
+        if ($this->hasColumn('products', 'size')) {
+            $selects[] = 'p.size';
+        }
+
+        if ($this->hasColumn('products', 'is_custom')) {
             $selects[] = 'p.is_custom';
         }
 
-        if (DB::getSchemaBuilder()->hasColumn('products', 'show_in_pos')) {
+        if ($this->hasColumn('products', 'show_in_pos')) {
             $selects[] = 'p.show_in_pos';
         }
 
@@ -191,6 +302,35 @@ class OrdersController extends Controller
                     ->values();
 
                 if ($detail) {
+                    $sphere = $detail->sphere !== null ? (float) $detail->sphere : null;
+                    $cylinder = $detail->cylinder !== null ? (float) $detail->cylinder : null;
+                    $axis = $detail->axis !== null ? (int) $detail->axis : null;
+
+                    $isCustomProduct = (int) ($detail->is_custom ?? 0) === 1;
+
+                    $customBiselPayload = null;
+
+                    if ($customBisel || $isCustomProduct) {
+                        $customBiselPayload = [
+                            'reflection' => $customBisel?->reflection ?: $this->formatRefractionText($sphere, $cylinder, $axis),
+                            'sphere' => $sphere,
+                            'cylinder' => $cylinder,
+                            'axis' => $axis,
+                            'lens_type_id' => $customBisel?->lens_type_id
+                                ? (int) $customBisel->lens_type_id
+                                : ($detail->lens_type_id ? (int) $detail->lens_type_id : null),
+                            'lens_type_code' => $customBisel?->lens_type_code ?? $detail->lens_type_code,
+                            'lens_type_name' => $customBisel?->lens_type_name ?? $detail->lens_type_name,
+                            'frame_height' => $customBisel && $customBisel->frame_height !== null
+                                ? (float) $customBisel->frame_height
+                                : null,
+                            'blank_height' => $customBisel && $customBisel->blank_height !== null
+                                ? (float) $customBisel->blank_height
+                                : null,
+                            'observations' => $customBisel?->observations ?? $detail->description,
+                        ];
+                    }
+
                     $productModel = new Product();
 
                     $productModel->forceFill([
@@ -204,10 +344,10 @@ class OrdersController extends Controller
                         'category_name' => $detail->category_name,
 
                         'type' => $detail->type,
-                        'brand' => $detail->brand,
-                        'model' => $detail->model,
+                        'brand' => $detail->brand ?? null,
+                        'model' => $detail->model ?? null,
                         'material' => $detail->material,
-                        'size' => $detail->size,
+                        'size' => $detail->size ?? null,
 
                         'buy_price' => $detail->buy_price !== null ? (float) $detail->buy_price : null,
                         'sale_price' => $detail->sale_price !== null ? (float) $detail->sale_price : null,
@@ -228,9 +368,9 @@ class OrdersController extends Controller
                         'material_id' => $detail->material_id ? (int) $detail->material_id : null,
                         'material_name' => $detail->material_name,
 
-                        'sphere' => $detail->sphere !== null ? (float) $detail->sphere : null,
-                        'cylinder' => $detail->cylinder !== null ? (float) $detail->cylinder : null,
-                        'axis' => $detail->axis !== null ? (int) $detail->axis : null,
+                        'sphere' => $sphere,
+                        'cylinder' => $cylinder,
+                        'axis' => $axis,
 
                         'is_custom' => (int) ($detail->is_custom ?? 0),
                         'show_in_pos' => (int) ($detail->show_in_pos ?? 1),
@@ -243,19 +383,9 @@ class OrdersController extends Controller
                     $productModel->exists = true;
                     $productModel->setAttribute('treatments', $treatments);
 
-                    if ($customBisel) {
-                        $productModel->setAttribute('custom_bisel', [
-                            'reflection' => $customBisel->reflection,
-                            'sphere' => $detail->sphere !== null ? (float) $detail->sphere : null,
-                            'cylinder' => $detail->cylinder !== null ? (float) $detail->cylinder : null,
-                            'axis' => $detail->axis !== null ? (int) $detail->axis : null,
-                            'lens_type_id' => $customBisel->lens_type_id ? (int) $customBisel->lens_type_id : null,
-                            'lens_type_code' => $customBisel->lens_type_code,
-                            'lens_type_name' => $customBisel->lens_type_name,
-                            'frame_height' => $customBisel->frame_height !== null ? (float) $customBisel->frame_height : null,
-                            'blank_height' => $customBisel->blank_height !== null ? (float) $customBisel->blank_height : null,
-                            'observations' => $customBisel->observations,
-                        ]);
+                    if ($customBiselPayload) {
+                        $productModel->setAttribute('custom_bisel', $customBiselPayload);
+                        $item->setAttribute('custom_bisel', $customBiselPayload);
                     }
 
                     $item->unsetRelation('product');
@@ -263,21 +393,6 @@ class OrdersController extends Controller
                 }
 
                 $item->setAttribute('treatments', $treatments);
-
-                if ($customBisel) {
-                    $item->setAttribute('custom_bisel', [
-                        'reflection' => $customBisel->reflection,
-                        'sphere' => $detail && $detail->sphere !== null ? (float) $detail->sphere : null,
-                        'cylinder' => $detail && $detail->cylinder !== null ? (float) $detail->cylinder : null,
-                        'axis' => $detail && $detail->axis !== null ? (int) $detail->axis : null,
-                        'lens_type_id' => $customBisel->lens_type_id ? (int) $customBisel->lens_type_id : null,
-                        'lens_type_code' => $customBisel->lens_type_code,
-                        'lens_type_name' => $customBisel->lens_type_name,
-                        'frame_height' => $customBisel->frame_height !== null ? (float) $customBisel->frame_height : null,
-                        'blank_height' => $customBisel->blank_height !== null ? (float) $customBisel->blank_height : null,
-                        'observations' => $customBisel->observations,
-                    ]);
-                }
 
                 return $item;
             });
@@ -291,10 +406,6 @@ class OrdersController extends Controller
         $categoryId = $this->resolveBiselCategoryId();
 
         $lensTypeId = !empty($itemData['lens_type_id']) ? (int) $itemData['lens_type_id'] : null;
-        $reflection = trim((string) ($itemData['reflection'] ?? ''));
-        $observations = trim((string) ($itemData['observations'] ?? ''));
-        $unitPrice = (float) ($itemData['unit_price'] ?? 0);
-        $customName = trim((string) ($itemData['name'] ?? ''));
 
         $sphere = array_key_exists('sphere', $itemData) && $itemData['sphere'] !== null && $itemData['sphere'] !== ''
             ? (float) $itemData['sphere']
@@ -308,8 +419,18 @@ class OrdersController extends Controller
             ? (int) $itemData['axis']
             : null;
 
+        $reflection = trim((string) ($itemData['reflection'] ?? ''));
+        $observations = trim((string) ($itemData['observations'] ?? ''));
+        $unitPrice = (float) ($itemData['unit_price'] ?? 0);
+        $customName = trim((string) ($itemData['name'] ?? ''));
+
+        $refractionText = $this->formatRefractionText($sphere, $cylinder, $axis);
+
         $nameParts = [$customName !== '' ? $customName : 'Biselado personalizado'];
-        if ($reflection !== '') {
+
+        if ($refractionText) {
+            $nameParts[] = $refractionText;
+        } elseif ($reflection !== '') {
             $nameParts[] = $reflection;
         }
 
@@ -337,19 +458,27 @@ class OrdersController extends Controller
             'deleted_at' => null,
         ];
 
-        if (DB::getSchemaBuilder()->hasColumn('products', 'brand')) {
+        if ($this->hasColumn('products', 'brand')) {
             $payload['brand'] = null;
         }
-        if (DB::getSchemaBuilder()->hasColumn('products', 'model')) {
+
+        if ($this->hasColumn('products', 'model')) {
             $payload['model'] = null;
         }
-        if (DB::getSchemaBuilder()->hasColumn('products', 'size')) {
+
+        if ($this->hasColumn('products', 'size')) {
             $payload['size'] = null;
         }
-        if (DB::getSchemaBuilder()->hasColumn('products', 'is_custom')) {
+
+        if ($this->hasColumn('products', 'treatment_id')) {
+            $payload['treatment_id'] = null;
+        }
+
+        if ($this->hasColumn('products', 'is_custom')) {
             $payload['is_custom'] = 1;
         }
-        if (DB::getSchemaBuilder()->hasColumn('products', 'show_in_pos')) {
+
+        if ($this->hasColumn('products', 'show_in_pos')) {
             $payload['show_in_pos'] = 0;
         }
 
@@ -358,7 +487,7 @@ class OrdersController extends Controller
 
     private function isCustomProductId(int $productId): bool
     {
-        if (!DB::getSchemaBuilder()->hasColumn('products', 'is_custom')) {
+        if (!$this->hasColumn('products', 'is_custom')) {
             return false;
         }
 
@@ -439,23 +568,23 @@ class OrdersController extends Controller
             'items.*.variant_id' => ['nullable', 'integer'],
             'items.*.qty' => ['required', 'integer', 'min:1'],
             'items.*.unit_price' => ['required', 'numeric', 'min:0'],
-            'items.*.axis' => ['nullable', 'integer'],
+            'items.*.axis' => ['nullable', 'integer', 'between:1,180'],
             'items.*.item_notes' => ['nullable', 'string'],
 
             'items.*.treatments' => ['nullable', 'array'],
             'items.*.treatments.*' => ['integer', 'exists:treatments,id'],
 
             'items.*.custom_bisel' => ['nullable', 'boolean'],
-            'items.*.reflection' => ['nullable', 'string', 'max:120'],
+            'items.*.reflection' => ['nullable', 'string', 'max:190'],
+
+            'items.*.sphere' => ['nullable', 'numeric', 'between:-40,40'],
+            'items.*.cylinder' => ['nullable', 'numeric', 'lt:0'],
+
             'items.*.lens_type_id' => ['nullable', 'integer', 'exists:lens_types,id'],
             'items.*.frame_height' => ['nullable', 'numeric', 'min:0'],
             'items.*.blank_height' => ['nullable', 'numeric', 'min:0'],
             'items.*.observations' => ['nullable', 'string'],
             'items.*.name' => ['nullable', 'string', 'max:190'],
-
-            'items.*.sphere' => ['nullable', 'numeric', 'between:-40,40'],
-            'items.*.cylinder' => ['nullable', 'numeric', 'lt:0'],
-            'items.*.axis' => ['nullable', 'integer', 'between:1,180'],
         ]);
 
         return DB::transaction(function () use ($data, $u) {
@@ -467,6 +596,7 @@ class OrdersController extends Controller
 
                 $qty = (int) ($it['qty'] ?? 1);
                 $unitPrice = (float) ($it['unit_price'] ?? 0);
+
                 $treatments = collect($it['treatments'] ?? [])
                     ->map(fn ($v) => (int) $v)
                     ->filter(fn ($v) => $v > 0)
@@ -475,6 +605,8 @@ class OrdersController extends Controller
                     ->all();
 
                 if ($isCustomBisel) {
+                    $this->validateCustomRefraction($it, $idx);
+
                     if ($qty !== 1) {
                         abort(response()->json([
                             'message' => 'El biselado personalizado solo puede agregarse una vez por renglón.',
@@ -511,54 +643,6 @@ class OrdersController extends Controller
                         ], 422));
                     }
 
-                    $sphere = array_key_exists('sphere', $it) && $it['sphere'] !== null && $it['sphere'] !== ''
-                        ? (float) $it['sphere']
-                        : null;
-
-                    $cylinder = array_key_exists('cylinder', $it) && $it['cylinder'] !== null && $it['cylinder'] !== ''
-                        ? (float) $it['cylinder']
-                        : null;
-
-                    $axis = array_key_exists('axis', $it) && $it['axis'] !== null && $it['axis'] !== ''
-                        ? (int) $it['axis']
-                        : null;
-
-                    if ($cylinder !== null && $cylinder >= 0) {
-                        abort(response()->json([
-                            'message' => 'Error de validación',
-                            'errors' => [
-                                "items.{$idx}.cylinder" => ['El cilindro debe ser negativo y no puede ser 0.']
-                            ]
-                        ], 422));
-                    }
-
-                    if ($cylinder !== null && $axis === null) {
-                        abort(response()->json([
-                            'message' => 'Error de validación',
-                            'errors' => [
-                                "items.{$idx}.axis" => ['Si capturas cilindro debes capturar el eje.']
-                            ]
-                        ], 422));
-                    }
-
-                    if ($cylinder === null && $axis !== null) {
-                        abort(response()->json([
-                            'message' => 'Error de validación',
-                            'errors' => [
-                                "items.{$idx}.cylinder" => ['Si capturas eje debes capturar cilindro.']
-                            ]
-                        ], 422));
-                    }
-
-                    if ($axis !== null && ($axis < 1 || $axis > 180)) {
-                        abort(response()->json([
-                            'message' => 'Error de validación',
-                            'errors' => [
-                                "items.{$idx}.axis" => ['El eje debe estar entre 1 y 180.']
-                            ]
-                        ], 422));
-                    }
-
                     $pid = $this->createCustomBiselProduct($it);
                 } else {
                     $pid = (int) ($it['product_id'] ?? 0);
@@ -568,6 +652,21 @@ class OrdersController extends Controller
                             'message' => 'Producto inválido.',
                             'errors' => [
                                 "items.{$idx}.product_id" => ['Debes enviar un product_id válido.']
+                            ]
+                        ], 422));
+                    }
+
+                    $product = DB::table('products as p')
+                        ->where('p.id', $pid)
+                        ->whereNull('p.deleted_at')
+                        ->select('p.id', 'p.sale_price')
+                        ->first();
+
+                    if (!$product) {
+                        abort(response()->json([
+                            'message' => 'Producto no encontrado',
+                            'errors' => [
+                                'items' => ["No existe el producto {$pid}"]
                             ]
                         ], 422));
                     }
@@ -591,21 +690,6 @@ class OrdersController extends Controller
                             ]
                         ], 422));
                     }
-
-                    $product = DB::table('products as p')
-                        ->where('p.id', $pid)
-                        ->whereNull('p.deleted_at')
-                        ->select('p.id', 'p.sale_price')
-                        ->first();
-
-                    if (!$product) {
-                        abort(response()->json([
-                            'message' => 'Producto no encontrado',
-                            'errors' => [
-                                'items' => ["No existe el producto {$pid}"]
-                            ]
-                        ], 422));
-                    }
                 }
 
                 $lineTotal = $qty * $unitPrice;
@@ -623,6 +707,9 @@ class OrdersController extends Controller
                     'custom_bisel' => $isCustomBisel,
                     'custom_bisel_detail' => $isCustomBisel ? [
                         'reflection' => $it['reflection'] ?? null,
+                        'sphere' => $it['sphere'] ?? null,
+                        'cylinder' => $it['cylinder'] ?? null,
+                        'axis' => $it['axis'] ?? null,
                         'lens_type_id' => $it['lens_type_id'] ?? null,
                         'frame_height' => $it['frame_height'] ?? null,
                         'blank_height' => $it['blank_height'] ?? null,
@@ -654,7 +741,7 @@ class OrdersController extends Controller
                     'item_notes' => $it['item_notes'],
                 ]);
 
-                if (!empty($it['treatments']) && DB::getSchemaBuilder()->hasTable('order_item_treatments')) {
+                if (!empty($it['treatments']) && $this->hasTable('order_item_treatments')) {
                     foreach ($it['treatments'] as $treatmentId) {
                         DB::table('order_item_treatments')->insert([
                             'order_item_id' => $orderItem->id,
@@ -666,13 +753,34 @@ class OrdersController extends Controller
                     }
                 }
 
-                if (!empty($it['custom_bisel']) && !empty($it['custom_bisel_detail']) && DB::getSchemaBuilder()->hasTable('order_item_custom_bisel')) {
+                if (!empty($it['custom_bisel']) && !empty($it['custom_bisel_detail']) && $this->hasTable('order_item_custom_bisel')) {
+                    $sphere = isset($it['custom_bisel_detail']['sphere']) && $it['custom_bisel_detail']['sphere'] !== ''
+                        ? (float) $it['custom_bisel_detail']['sphere']
+                        : null;
+
+                    $cylinder = isset($it['custom_bisel_detail']['cylinder']) && $it['custom_bisel_detail']['cylinder'] !== ''
+                        ? (float) $it['custom_bisel_detail']['cylinder']
+                        : null;
+
+                    $axis = isset($it['custom_bisel_detail']['axis']) && $it['custom_bisel_detail']['axis'] !== ''
+                        ? (int) $it['custom_bisel_detail']['axis']
+                        : null;
+
+                    $reflection = $it['custom_bisel_detail']['reflection']
+                        ?? $this->formatRefractionText($sphere, $cylinder, $axis);
+
                     DB::table('order_item_custom_bisel')->insert([
                         'order_item_id' => $orderItem->id,
-                        'reflection' => $it['custom_bisel_detail']['reflection'] ?? null,
-                        'lens_type_id' => !empty($it['custom_bisel_detail']['lens_type_id']) ? (int) $it['custom_bisel_detail']['lens_type_id'] : null,
-                        'frame_height' => isset($it['custom_bisel_detail']['frame_height']) ? (float) $it['custom_bisel_detail']['frame_height'] : null,
-                        'blank_height' => isset($it['custom_bisel_detail']['blank_height']) ? (float) $it['custom_bisel_detail']['blank_height'] : null,
+                        'reflection' => $reflection,
+                        'lens_type_id' => !empty($it['custom_bisel_detail']['lens_type_id'])
+                            ? (int) $it['custom_bisel_detail']['lens_type_id']
+                            : null,
+                        'frame_height' => isset($it['custom_bisel_detail']['frame_height'])
+                            ? (float) $it['custom_bisel_detail']['frame_height']
+                            : null,
+                        'blank_height' => isset($it['custom_bisel_detail']['blank_height'])
+                            ? (float) $it['custom_bisel_detail']['blank_height']
+                            : null,
                         'observations' => $it['custom_bisel_detail']['observations'] ?? null,
                         'created_at' => now(),
                         'updated_at' => now(),
@@ -687,7 +795,7 @@ class OrdersController extends Controller
                             'updated_at' => now(),
                         ]);
 
-                    if (DB::getSchemaBuilder()->hasTable('inventory_movements')) {
+                    if ($this->hasTable('inventory_movements')) {
                         DB::table('inventory_movements')->insert([
                             'product_id' => $it['product_id'],
                             'variant_id' => $it['variant_id'],
@@ -799,7 +907,7 @@ class OrdersController extends Controller
                         'updated_at' => now(),
                     ]);
 
-                if (DB::getSchemaBuilder()->hasTable('inventory_movements')) {
+                if ($this->hasTable('inventory_movements')) {
                     DB::table('inventory_movements')->insert([
                         'product_id' => $pid,
                         'variant_id' => $it->variant_id,
@@ -908,7 +1016,7 @@ class OrdersController extends Controller
                                 'updated_at' => now(),
                             ]);
 
-                        if (DB::getSchemaBuilder()->hasTable('inventory_movements')) {
+                        if ($this->hasTable('inventory_movements')) {
                             DB::table('inventory_movements')->insert([
                                 'product_id' => $pid,
                                 'variant_id' => $it->variant_id,
@@ -943,7 +1051,7 @@ class OrdersController extends Controller
                                 'updated_at' => now(),
                             ]);
 
-                        if (DB::getSchemaBuilder()->hasTable('inventory_movements')) {
+                        if ($this->hasTable('inventory_movements')) {
                             DB::table('inventory_movements')->insert([
                                 'product_id' => $pid,
                                 'variant_id' => $it->variant_id,
