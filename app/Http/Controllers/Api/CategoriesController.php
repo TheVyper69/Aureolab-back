@@ -8,6 +8,8 @@ use App\Models\Product;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class CategoriesController extends Controller
 {
@@ -44,8 +46,10 @@ class CategoriesController extends Controller
 
         if ($this->hasCategoryColumn('is_mica')) {
             $response['is_mica'] = (bool) ($cat->is_mica ?? false);
+            $response['isMica'] = (bool) ($cat->is_mica ?? false);
         } else {
             $response['is_mica'] = false;
+            $response['isMica'] = false;
         }
 
         if ($this->hasCategoryColumn('buy_price')) {
@@ -68,6 +72,30 @@ class CategoriesController extends Controller
             $response['last_price_update_at'] = $cat->last_price_update_at;
         } else {
             $response['last_price_update_at'] = null;
+        }
+
+        if ($this->hasCategoryColumn('image_path')) {
+            $response['image_path'] = $cat->image_path;
+            $response['image_filename'] = $this->hasCategoryColumn('image_filename')
+                ? $cat->image_filename
+                : null;
+            $response['image_mime'] = $this->hasCategoryColumn('image_mime')
+                ? $cat->image_mime
+                : null;
+
+            $response['imageUrl'] = !empty($cat->image_path)
+                ? url("/api/categories/{$cat->id}/image")
+                : null;
+
+            $response['image_url'] = $response['imageUrl'];
+            $response['has_image'] = !empty($cat->image_path);
+        } else {
+            $response['image_path'] = null;
+            $response['image_filename'] = null;
+            $response['image_mime'] = null;
+            $response['imageUrl'] = null;
+            $response['image_url'] = null;
+            $response['has_image'] = false;
         }
 
         return array_merge($response, $extra);
@@ -98,6 +126,18 @@ class CategoriesController extends Controller
             $columns[] = 'last_price_update_at';
         }
 
+        if ($this->hasCategoryColumn('image_filename')) {
+            $columns[] = 'image_filename';
+        }
+
+        if ($this->hasCategoryColumn('image_mime')) {
+            $columns[] = 'image_mime';
+        }
+
+        if ($this->hasCategoryColumn('image_path')) {
+            $columns[] = 'image_path';
+        }
+
         return $columns;
     }
 
@@ -120,6 +160,7 @@ class CategoriesController extends Controller
 
         if ($this->hasCategoryColumn('is_mica')) {
             $rules['is_mica'] = ['nullable', 'boolean'];
+            $rules['isMica'] = ['nullable', 'boolean'];
         }
 
         if ($this->hasCategoryColumn('buy_price')) {
@@ -130,6 +171,10 @@ class CategoriesController extends Controller
         if ($this->hasCategoryColumn('sale_price')) {
             $rules['sale_price'] = ['nullable', 'numeric', 'min:0'];
             $rules['salePrice'] = ['nullable', 'numeric', 'min:0'];
+        }
+
+        if ($this->hasCategoryColumn('image_path')) {
+            $rules['image'] = ['nullable', 'image', 'max:15360'];
         }
 
         return $rules;
@@ -148,6 +193,19 @@ class CategoriesController extends Controller
         return $default;
     }
 
+    private function boolFromRequest(array $data, string $snakeKey, string $camelKey, bool $default = false): bool
+    {
+        if (array_key_exists($snakeKey, $data)) {
+            return (bool) $data[$snakeKey];
+        }
+
+        if (array_key_exists($camelKey, $data)) {
+            return (bool) $data[$camelKey];
+        }
+
+        return $default;
+    }
+
     private function applyDataToCategory(Category $cat, array $data): void
     {
         $cat->code = $data['code'];
@@ -155,9 +213,12 @@ class CategoriesController extends Controller
         $cat->description = $data['description'] ?? null;
 
         if ($this->hasCategoryColumn('is_mica')) {
-            $cat->is_mica = array_key_exists('is_mica', $data)
-                ? (int) ((bool) $data['is_mica'])
-                : (int) ($cat->is_mica ?? 0);
+            $cat->is_mica = (int) $this->boolFromRequest(
+                $data,
+                'is_mica',
+                'isMica',
+                (bool) ($cat->is_mica ?? false)
+            );
         }
 
         if ($this->hasCategoryColumn('buy_price')) {
@@ -179,12 +240,81 @@ class CategoriesController extends Controller
         }
     }
 
+    private function fillCategoryImage(Category $cat, Request $request): void
+    {
+        if (!$this->hasCategoryColumn('image_path')) {
+            return;
+        }
+
+        if (!$request->hasFile('image')) {
+            return;
+        }
+
+        $file = $request->file('image');
+
+        if (!$file || !$file->isValid()) {
+            return;
+        }
+
+        if (!empty($cat->image_path) && Storage::disk('local')->exists($cat->image_path)) {
+            Storage::disk('local')->delete($cat->image_path);
+        }
+
+        $ext = $file->getClientOriginalExtension() ?: $file->extension() ?: 'jpg';
+        $filename = 'categories/' . Str::uuid() . '.' . strtolower($ext);
+
+        Storage::disk('local')->putFileAs(
+            'categories',
+            $file,
+            basename($filename)
+        );
+
+        $cat->image_path = $filename;
+
+        if ($this->hasCategoryColumn('image_filename')) {
+            $cat->image_filename = $file->getClientOriginalName();
+        }
+
+        if ($this->hasCategoryColumn('image_mime')) {
+            $cat->image_mime = $file->getMimeType();
+        }
+    }
+
     private function shouldUpdateProductsPrices(Request $request): bool
     {
         return $request->boolean('update_products_prices')
             || $request->boolean('updateProductsPrices')
             || $request->boolean('apply_prices_to_products')
             || $request->boolean('applyPricesToProducts');
+    }
+
+    private function shouldRemoveImage(Request $request): bool
+    {
+        return $request->boolean('remove_image')
+            || $request->boolean('removeImage')
+            || $request->boolean('delete_image')
+            || $request->boolean('deleteImage');
+    }
+
+    private function removeCategoryImage(Category $cat): void
+    {
+        if (!$this->hasCategoryColumn('image_path')) {
+            return;
+        }
+
+        if (!empty($cat->image_path) && Storage::disk('local')->exists($cat->image_path)) {
+            Storage::disk('local')->delete($cat->image_path);
+        }
+
+        $cat->image_path = null;
+
+        if ($this->hasCategoryColumn('image_filename')) {
+            $cat->image_filename = null;
+        }
+
+        if ($this->hasCategoryColumn('image_mime')) {
+            $cat->image_mime = null;
+        }
     }
 
     private function updateProductsPricesFromCategory(Category $cat): int
@@ -233,7 +363,7 @@ class CategoriesController extends Controller
     {
         $data = $request->validate($this->baseRules());
 
-        return DB::transaction(function () use ($data) {
+        return DB::transaction(function () use ($request, $data) {
             $cat = new Category();
 
             $this->applyDataToCategory($cat, $data);
@@ -241,6 +371,8 @@ class CategoriesController extends Controller
             if ($this->hasCategoryColumn('last_price_update_at')) {
                 $cat->last_price_update_at = null;
             }
+
+            $this->fillCategoryImage($cat, $request);
 
             $cat->save();
 
@@ -269,11 +401,22 @@ class CategoriesController extends Controller
                 'updateProductsPrices' => ['nullable', 'boolean'],
                 'apply_prices_to_products' => ['nullable', 'boolean'],
                 'applyPricesToProducts' => ['nullable', 'boolean'],
+
+                'remove_image' => ['nullable', 'boolean'],
+                'removeImage' => ['nullable', 'boolean'],
+                'delete_image' => ['nullable', 'boolean'],
+                'deleteImage' => ['nullable', 'boolean'],
             ]
         ));
 
         return DB::transaction(function () use ($request, $cat, $data, $oldBuyPrice, $oldSalePrice) {
             $this->applyDataToCategory($cat, $data);
+
+            if ($this->shouldRemoveImage($request)) {
+                $this->removeCategoryImage($cat);
+            }
+
+            $this->fillCategoryImage($cat, $request);
 
             $newBuyPrice = $this->hasCategoryColumn('buy_price')
                 ? (float) ($cat->buy_price ?? 0)
@@ -307,6 +450,45 @@ class CategoriesController extends Controller
         });
     }
 
+    public function image($id)
+    {
+        $cat = Category::query()
+            ->where('id', $id)
+            ->whereNull('deleted_at')
+            ->first();
+
+        if (!$cat || !$this->hasCategoryColumn('image_path') || empty($cat->image_path)) {
+            return response()->noContent();
+        }
+
+        if (!Storage::disk('local')->exists($cat->image_path)) {
+            return response()->noContent();
+        }
+
+        $mime = $this->hasCategoryColumn('image_mime')
+            ? ($cat->image_mime ?: 'image/jpeg')
+            : 'image/jpeg';
+
+        $filename = $this->hasCategoryColumn('image_filename')
+            ? ($cat->image_filename ?: "category_{$cat->id}.jpg")
+            : "category_{$cat->id}.jpg";
+
+        $stream = Storage::disk('local')->readStream($cat->image_path);
+
+        return response()->stream(function () use ($stream) {
+            fpassthru($stream);
+
+            if (is_resource($stream)) {
+                fclose($stream);
+            }
+        }, 200, [
+            'Content-Type' => $mime,
+            'Content-Disposition' => 'inline; filename="' . $filename . '"',
+            'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma' => 'no-cache',
+        ]);
+    }
+
     public function destroy($id)
     {
         $cat = Category::query()
@@ -333,6 +515,8 @@ class CategoriesController extends Controller
                 'products_count' => $productsCount,
             ], 422);
         }
+
+        $this->removeCategoryImage($cat);
 
         $cat->delete();
 

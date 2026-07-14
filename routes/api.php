@@ -62,45 +62,73 @@ Route::middleware('auth:sanctum')->group(function () {
     |--------------------------------------------------------------------------
     | Admin / Employee / Optica
     |--------------------------------------------------------------------------
+    | Lectura general y operaciones permitidas para usuarios autenticados
+    |--------------------------------------------------------------------------
     */
 
     Route::middleware('role:admin,employee,optica')->group(function () {
 
-        // Orders
+        /*
+        |--------------------------------------------------------------------------
+        | Orders
+        |--------------------------------------------------------------------------
+        */
+
         Route::get('/orders', [OrdersController::class, 'index']);
         Route::post('/orders', [OrdersController::class, 'store']);
         Route::get('/orders/{id}', [OrdersController::class, 'show']);
+        Route::patch('/orders/{id}', [OrdersController::class, 'update']);
         Route::patch('/orders/{id}/cancel', [OrdersController::class, 'cancel']);
 
-        // Products / Inventory / Categories
+        /*
+        |--------------------------------------------------------------------------
+        | Products / Inventory
+        |--------------------------------------------------------------------------
+        */
+
         Route::get('/products', [ProductsController::class, 'index']);
+        Route::get('/products/{id}/image', [ProductsController::class, 'image']);
+
         Route::get('/inventory', [InventoryController::class, 'index']);
         Route::get('/inventory/low-stock', [InventoryController::class, 'lowStock']);
-        Route::get('/categories', [CategoriesController::class, 'index']);
 
-        // Product images / treatments
-        Route::get('/products/{id}/image', [ProductsController::class, 'image']);
+        /*
+        |--------------------------------------------------------------------------
+        | Categories
+        |--------------------------------------------------------------------------
+        */
+
+        Route::get('/categories', [CategoriesController::class, 'index']);
+        Route::get('/categories/{id}/image', [CategoriesController::class, 'image']);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Treatments
+        |--------------------------------------------------------------------------
+        */
+
         Route::get('/treatments', [TreatmentsController::class, 'index']);
         Route::get('/products/{id}/treatments', [TreatmentsController::class, 'byProduct']);
 
-        // Legacy sales
-        Route::post('/sales', [SalesController::class, 'store']);
-        Route::get('/sales/{id}', [SalesController::class, 'show']);
-        Route::get('/sales', function () {
-            return response()->json([
-                'ok' => false,
-                'message' => 'Use POST /api/sales to create a sale.'
-            ], 405);
-        });
+        /*
+        |--------------------------------------------------------------------------
+        | Catalogs
+        |--------------------------------------------------------------------------
+        */
 
-        // Catalogs
         Route::get('/opticas', [OpticasController::class, 'index']);
         Route::get('/lens-types', [LensTypeController::class, 'index']);
         Route::get('/materials', [MaterialController::class, 'index']);
+        Route::get('/materials/tipos-material', [MaterialController::class, 'show']);
         Route::get('/suppliers', [SupplierController::class, 'index']);
         Route::get('/boxes', [BoxController::class, 'index']);
 
-        // Reports
+        /*
+        |--------------------------------------------------------------------------
+        | Reports
+        |--------------------------------------------------------------------------
+        */
+
         Route::prefix('reports')->group(function () {
             Route::get('/dashboard', [ReportsController::class, 'dashboard']);
             Route::get('/orders/by-day', [ReportsController::class, 'ordersByDay']);
@@ -108,58 +136,116 @@ Route::middleware('auth:sanctum')->group(function () {
             Route::get('/orders/top-products', [ReportsController::class, 'ordersTopProducts']);
         });
 
-        Route::patch('/orders/{id}', [OrdersController::class, 'update']);
+        /*
+        |--------------------------------------------------------------------------
+        | Legacy Sales
+        |--------------------------------------------------------------------------
+        */
+
+        Route::post('/sales', [SalesController::class, 'store']);
+        Route::get('/sales/{id}', [SalesController::class, 'show']);
+
+        Route::get('/sales', function () {
+            return response()->json([
+                'ok' => false,
+                'message' => 'Use POST /api/sales to create a sale.',
+            ], 405);
+        });
     });
 
     /*
     |--------------------------------------------------------------------------
     | Admin only
     |--------------------------------------------------------------------------
+    | Altas, bajas, cambios y operaciones administrativas
+    |--------------------------------------------------------------------------
     */
 
     Route::middleware('role:admin')->group(function () {
 
-        // Auth
+        /*
+        |--------------------------------------------------------------------------
+        | Auth / Users
+        |--------------------------------------------------------------------------
+        */
+
         Route::post('/auth/register', [AuthController::class, 'register']);
         Route::get('/users', [AuthController::class, 'usersIndex']);
         Route::put('/users/{id}', [AuthController::class, 'updateUser']);
         Route::delete('/users/{id}', [AuthController::class, 'deleteUser']);
 
-        // Opticas
+        /*
+        |--------------------------------------------------------------------------
+        | Opticas
+        |--------------------------------------------------------------------------
+        */
+
         Route::post('/opticas', [OpticasController::class, 'store']);
 
-        // Products
+        /*
+        |--------------------------------------------------------------------------
+        | Products
+        |--------------------------------------------------------------------------
+        */
+
         Route::post('/products', [ProductsController::class, 'store']);
         Route::get('/products/{id}', [ProductsController::class, 'show']);
         Route::put('/products/{id}', [ProductsController::class, 'update']);
+        Route::post('/products/{id}', [ProductsController::class, 'update']);
         Route::delete('/products/{id}', [ProductsController::class, 'destroy']);
         Route::post('/products/{id}/stock', [ProductsController::class, 'addStock']);
 
-        // Categories
+        /*
+        |--------------------------------------------------------------------------
+        | Categories
+        |--------------------------------------------------------------------------
+        | POST /categories/{id} se usa para editar con FormData + imagen.
+        |--------------------------------------------------------------------------
+        */
+
         Route::post('/categories', [CategoriesController::class, 'store']);
         Route::put('/categories/{id}', [CategoriesController::class, 'update']);
+        Route::post('/categories/{id}', [CategoriesController::class, 'update']);
         Route::delete('/categories/{id}', [CategoriesController::class, 'destroy']);
 
-        // Lens types
+        /*
+        |--------------------------------------------------------------------------
+        | Lens Types
+        |--------------------------------------------------------------------------
+        */
+
         Route::post('/lens-types', [LensTypeController::class, 'store']);
         Route::put('/lens-types/{id}', [LensTypeController::class, 'update']);
         Route::delete('/lens-types/{id}', [LensTypeController::class, 'destroy']);
 
-        // Materials
+        /*
+        |--------------------------------------------------------------------------
+        | Materials
+        |--------------------------------------------------------------------------
+        */
+
         Route::post('/materials', [MaterialController::class, 'store']);
         Route::put('/materials/{id}', [MaterialController::class, 'update']);
         Route::delete('/materials/{id}', [MaterialController::class, 'destroy']);
-        Route::get('/materials/tipos-material', [MaterialController::class, 'show']);
 
-        // Suppliers
+        /*
+        |--------------------------------------------------------------------------
+        | Suppliers
+        |--------------------------------------------------------------------------
+        */
+
         Route::post('/suppliers', [SupplierController::class, 'store']);
         Route::put('/suppliers/{id}', [SupplierController::class, 'update']);
         Route::delete('/suppliers/{id}', [SupplierController::class, 'destroy']);
 
-        // Boxes
+        /*
+        |--------------------------------------------------------------------------
+        | Boxes
+        |--------------------------------------------------------------------------
+        */
+
         Route::post('/boxes', [BoxController::class, 'store']);
         Route::put('/boxes/{id}', [BoxController::class, 'update']);
         Route::delete('/boxes/{id}', [BoxController::class, 'destroy']);
-
     });
 });
