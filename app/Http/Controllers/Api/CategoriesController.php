@@ -9,7 +9,6 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 
 class CategoriesController extends Controller
 {
@@ -74,29 +73,36 @@ class CategoriesController extends Controller
             $response['last_price_update_at'] = null;
         }
 
-        if ($this->hasCategoryColumn('image_path')) {
-            $response['image_path'] = $cat->image_path;
-            $response['image_filename'] = $this->hasCategoryColumn('image_filename')
-                ? $cat->image_filename
-                : null;
-            $response['image_mime'] = $this->hasCategoryColumn('image_mime')
-                ? $cat->image_mime
-                : null;
+        $hasBlob = false;
 
-            $response['imageUrl'] = !empty($cat->image_path)
-                ? url("/api/categories/{$cat->id}/image")
-                : null;
+        if ($this->hasCategoryColumn('image_blob')) {
+            $attrs = $cat->getAttributes();
 
-            $response['image_url'] = $response['imageUrl'];
-            $response['has_image'] = !empty($cat->image_path);
-        } else {
-            $response['image_path'] = null;
-            $response['image_filename'] = null;
-            $response['image_mime'] = null;
-            $response['imageUrl'] = null;
-            $response['image_url'] = null;
-            $response['has_image'] = false;
+            $hasBlob =
+                (isset($cat->has_image_blob) && (bool) $cat->has_image_blob) ||
+                (array_key_exists('image_blob', $attrs) && !empty($cat->image_blob));
         }
+
+        $hasPath = $this->hasCategoryColumn('image_path') && !empty($cat->image_path);
+
+        $response['image_path'] = $this->hasCategoryColumn('image_path')
+            ? $cat->image_path
+            : null;
+
+        $response['image_filename'] = $this->hasCategoryColumn('image_filename')
+            ? $cat->image_filename
+            : null;
+
+        $response['image_mime'] = $this->hasCategoryColumn('image_mime')
+            ? $cat->image_mime
+            : null;
+
+        $response['imageUrl'] = ($hasBlob || $hasPath)
+            ? url("/api/categories/{$cat->id}/image")
+            : null;
+
+        $response['image_url'] = $response['imageUrl'];
+        $response['has_image'] = ($hasBlob || $hasPath);
 
         return array_merge($response, $extra);
     }
@@ -138,6 +144,12 @@ class CategoriesController extends Controller
             $columns[] = 'image_path';
         }
 
+        /*
+         * Importante:
+         * No agregamos image_blob aquí.
+         * Si lo cargamos en index(), cada listado de categorías puede volverse pesado.
+         */
+
         return $columns;
     }
 
@@ -173,7 +185,7 @@ class CategoriesController extends Controller
             $rules['salePrice'] = ['nullable', 'numeric', 'min:0'];
         }
 
-        if ($this->hasCategoryColumn('image_path')) {
+        if ($this->hasCategoryColumn('image_blob') || $this->hasCategoryColumn('image_path')) {
             $rules['image'] = ['nullable', 'image', 'max:15360'];
         }
 
@@ -242,7 +254,10 @@ class CategoriesController extends Controller
 
     private function fillCategoryImage(Category $cat, Request $request): void
     {
-        if (!$this->hasCategoryColumn('image_path')) {
+        if (
+            !$this->hasCategoryColumn('image_blob') &&
+            !$this->hasCategoryColumn('image_path')
+        ) {
             return;
         }
 
@@ -256,20 +271,11 @@ class CategoriesController extends Controller
             return;
         }
 
-        if (!empty($cat->image_path) && Storage::disk('local')->exists($cat->image_path)) {
-            Storage::disk('local')->delete($cat->image_path);
+        $binary = file_get_contents($file->getRealPath());
+
+        if ($this->hasCategoryColumn('image_blob')) {
+            $cat->image_blob = $binary;
         }
-
-        $ext = $file->getClientOriginalExtension() ?: $file->extension() ?: 'jpg';
-        $filename = 'categories/' . Str::uuid() . '.' . strtolower($ext);
-
-        Storage::disk('local')->putFileAs(
-            'categories',
-            $file,
-            basename($filename)
-        );
-
-        $cat->image_path = $filename;
 
         if ($this->hasCategoryColumn('image_filename')) {
             $cat->image_filename = $file->getClientOriginalName();
@@ -277,6 +283,18 @@ class CategoriesController extends Controller
 
         if ($this->hasCategoryColumn('image_mime')) {
             $cat->image_mime = $file->getMimeType();
+        }
+
+        /*
+         * Ya no usamos image_path como principal.
+         * Si antes existía un archivo físico, intentamos borrarlo y limpiamos la ruta.
+         */
+        if ($this->hasCategoryColumn('image_path')) {
+            if (!empty($cat->image_path) && Storage::disk('local')->exists($cat->image_path)) {
+                Storage::disk('local')->delete($cat->image_path);
+            }
+
+            $cat->image_path = null;
         }
     }
 
@@ -298,15 +316,17 @@ class CategoriesController extends Controller
 
     private function removeCategoryImage(Category $cat): void
     {
-        if (!$this->hasCategoryColumn('image_path')) {
-            return;
+        if ($this->hasCategoryColumn('image_blob')) {
+            $cat->image_blob = null;
         }
 
-        if (!empty($cat->image_path) && Storage::disk('local')->exists($cat->image_path)) {
-            Storage::disk('local')->delete($cat->image_path);
-        }
+        if ($this->hasCategoryColumn('image_path')) {
+            if (!empty($cat->image_path) && Storage::disk('local')->exists($cat->image_path)) {
+                Storage::disk('local')->delete($cat->image_path);
+            }
 
-        $cat->image_path = null;
+            $cat->image_path = null;
+        }
 
         if ($this->hasCategoryColumn('image_filename')) {
             $cat->image_filename = null;
@@ -349,10 +369,17 @@ class CategoriesController extends Controller
 
     public function index()
     {
-        $cats = Category::query()
+        $query = Category::query()
             ->whereNull('deleted_at')
+            ->select($this->categorySelectColumns());
+
+        if ($this->hasCategoryColumn('image_blob')) {
+            $query->selectRaw('image_blob IS NOT NULL as has_image_blob');
+        }
+
+        $cats = $query
             ->orderBy('name')
-            ->get($this->categorySelectColumns());
+            ->get();
 
         return response()->json(
             $cats->map(fn ($cat) => $this->categoryResponse($cat))->values()
@@ -452,16 +479,30 @@ class CategoriesController extends Controller
 
     public function image($id)
     {
+        $columns = ['id'];
+
+        if ($this->hasCategoryColumn('image_blob')) {
+            $columns[] = 'image_blob';
+        }
+
+        if ($this->hasCategoryColumn('image_filename')) {
+            $columns[] = 'image_filename';
+        }
+
+        if ($this->hasCategoryColumn('image_mime')) {
+            $columns[] = 'image_mime';
+        }
+
+        if ($this->hasCategoryColumn('image_path')) {
+            $columns[] = 'image_path';
+        }
+
         $cat = Category::query()
             ->where('id', $id)
             ->whereNull('deleted_at')
-            ->first();
+            ->first($columns);
 
-        if (!$cat || !$this->hasCategoryColumn('image_path') || empty($cat->image_path)) {
-            return response()->noContent();
-        }
-
-        if (!Storage::disk('local')->exists($cat->image_path)) {
+        if (!$cat) {
             return response()->noContent();
         }
 
@@ -473,20 +514,41 @@ class CategoriesController extends Controller
             ? ($cat->image_filename ?: "category_{$cat->id}.jpg")
             : "category_{$cat->id}.jpg";
 
-        $stream = Storage::disk('local')->readStream($cat->image_path);
+        if ($this->hasCategoryColumn('image_blob') && !empty($cat->image_blob)) {
+            return response($cat->image_blob, 200, [
+                'Content-Type' => $mime,
+                'Content-Disposition' => 'inline; filename="' . $filename . '"',
+                'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+                'Pragma' => 'no-cache',
+            ]);
+        }
 
-        return response()->stream(function () use ($stream) {
-            fpassthru($stream);
+        /*
+         * Fallback por compatibilidad:
+         * Si alguna categoría vieja todavía tiene image_path, aún puede mostrarse.
+         */
+        if (
+            $this->hasCategoryColumn('image_path') &&
+            !empty($cat->image_path) &&
+            Storage::disk('local')->exists($cat->image_path)
+        ) {
+            $stream = Storage::disk('local')->readStream($cat->image_path);
 
-            if (is_resource($stream)) {
-                fclose($stream);
-            }
-        }, 200, [
-            'Content-Type' => $mime,
-            'Content-Disposition' => 'inline; filename="' . $filename . '"',
-            'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
-            'Pragma' => 'no-cache',
-        ]);
+            return response()->stream(function () use ($stream) {
+                fpassthru($stream);
+
+                if (is_resource($stream)) {
+                    fclose($stream);
+                }
+            }, 200, [
+                'Content-Type' => $mime,
+                'Content-Disposition' => 'inline; filename="' . $filename . '"',
+                'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+                'Pragma' => 'no-cache',
+            ]);
+        }
+
+        return response()->noContent();
     }
 
     public function destroy($id)

@@ -465,6 +465,31 @@ class ProductsController extends Controller
             $category = Category::whereNull('deleted_at')->find($p->category_id);
         }
 
+        $hasOwnImage =
+            (!empty($p->image_path)) ||
+            (
+                $this->hasProductColumn('image_blob') &&
+                array_key_exists('image_blob', $p->getAttributes()) &&
+                !empty($p->image_blob)
+            );
+
+        $hasCategoryImage = false;
+
+        if ($category) {
+            $hasCategoryImage =
+                (
+                    $this->hasCategoryColumn('image_blob') &&
+                    array_key_exists('image_blob', $category->getAttributes()) &&
+                    !empty($category->image_blob)
+                ) ||
+                (
+                    $this->hasCategoryColumn('image_path') &&
+                    !empty($category->image_path)
+                );
+        }
+
+        $hasImage = $hasOwnImage || $hasCategoryImage;
+
         $response = [
             'id' => $p->id,
             'sku' => $p->sku,
@@ -500,9 +525,11 @@ class ProductsController extends Controller
 
             'treatments' => $this->getTreatmentsForProduct((int) $p->id),
 
-            'imageUrl' => !empty($p->image_path)
-                ? url("/api/products/{$p->id}/image")
-                : null,
+            'imageUrl' => $hasImage ? url("/api/products/{$p->id}/image") : null,
+            'image_url' => $hasImage ? url("/api/products/{$p->id}/image") : null,
+            'has_image' => $hasImage,
+            'has_own_image' => $hasOwnImage,
+            'has_category_image' => $hasCategoryImage,
 
             'active' => (bool) $p->active,
         ];
@@ -972,9 +999,9 @@ class ProductsController extends Controller
 
                         'treatments' => $this->mapTreatments($treatmentsByProduct->get($r->product_id, [])),
 
-                        'imageUrl' => $r->image_path
-                            ? url("/api/products/{$r->product_id}/image")
-                            : null,
+                        'imageUrl' => url("/api/products/{$r->product_id}/image"),
+                        'image_url' => url("/api/products/{$r->product_id}/image"),
+                        'has_image' => true,
 
                         'category' => $r->category_code ?? $r->category_name ?? null,
                         'category_label' => $r->category_name ?? null,
@@ -1276,23 +1303,63 @@ class ProductsController extends Controller
     }
 
     public function image($id)
-    {
-        $p = Product::query()
-            ->select('id', 'image_path', 'image_mime', 'image_filename')
-            ->where('id', $id)
-            ->whereNull('deleted_at')
-            ->first();
+{
+    $productColumns = ['id', 'category_id'];
 
-        if (!$p || !$p->image_path || !Storage::disk('local')->exists($p->image_path)) {
-            return response()->noContent();
+    foreach (['image_blob', 'image_path', 'image_mime', 'image_filename'] as $col) {
+        if ($this->hasProductColumn($col)) {
+            $productColumns[] = $col;
         }
+    }
 
+    $p = Product::query()
+        ->select($productColumns)
+        ->where('id', $id)
+        ->whereNull('deleted_at')
+        ->first();
+
+    if (!$p) {
+        return response()->noContent();
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | 1) Imagen propia del producto en BLOB
+    |--------------------------------------------------------------------------
+    */
+    if (
+        $this->hasProductColumn('image_blob') &&
+        array_key_exists('image_blob', $p->getAttributes()) &&
+        !empty($p->image_blob)
+    ) {
         $mime = $p->image_mime ?: 'image/jpeg';
+        $filename = $p->image_filename ?: "product_{$p->id}.jpg";
+
+        return response($p->image_blob, 200, [
+            'Content-Type' => $mime,
+            'Content-Disposition' => 'inline; filename="' . $filename . '"',
+            'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma' => 'no-cache',
+        ]);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | 2) Imagen propia del producto en storage/path
+    |--------------------------------------------------------------------------
+    */
+    if (
+        $this->hasProductColumn('image_path') &&
+        !empty($p->image_path) &&
+        Storage::disk('local')->exists($p->image_path)
+    ) {
+        $mime = $p->image_mime ?: Storage::disk('local')->mimeType($p->image_path) ?: 'image/jpeg';
         $filename = $p->image_filename ?: "product_{$p->id}.jpg";
         $stream = Storage::disk('local')->readStream($p->image_path);
 
         return response()->stream(function () use ($stream) {
             fpassthru($stream);
+
             if (is_resource($stream)) {
                 fclose($stream);
             }
@@ -1303,6 +1370,81 @@ class ProductsController extends Controller
             'Pragma' => 'no-cache',
         ]);
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | 3) Fallback: imagen heredada de la categoría
+    |--------------------------------------------------------------------------
+    */
+    if (!empty($p->category_id)) {
+        $categoryColumns = ['id'];
+
+        foreach (['image_blob', 'image_path', 'image_mime', 'image_filename'] as $col) {
+            if ($this->hasCategoryColumn($col)) {
+                $categoryColumns[] = $col;
+            }
+        }
+
+        $category = Category::query()
+            ->select($categoryColumns)
+            ->where('id', $p->category_id)
+            ->whereNull('deleted_at')
+            ->first();
+
+        if ($category) {
+            /*
+            |--------------------------------------------------------------------------
+            | 3.1) Imagen de categoría en BLOB
+            |--------------------------------------------------------------------------
+            */
+            if (
+                $this->hasCategoryColumn('image_blob') &&
+                array_key_exists('image_blob', $category->getAttributes()) &&
+                !empty($category->image_blob)
+            ) {
+                $mime = $category->image_mime ?: 'image/jpeg';
+                $filename = $category->image_filename ?: "category_{$category->id}.jpg";
+
+                return response($category->image_blob, 200, [
+                    'Content-Type' => $mime,
+                    'Content-Disposition' => 'inline; filename="' . $filename . '"',
+                    'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+                    'Pragma' => 'no-cache',
+                ]);
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | 3.2) Imagen de categoría en storage/path
+            |--------------------------------------------------------------------------
+            */
+            if (
+                $this->hasCategoryColumn('image_path') &&
+                !empty($category->image_path) &&
+                Storage::disk('local')->exists($category->image_path)
+            ) {
+                $mime = $category->image_mime ?: Storage::disk('local')->mimeType($category->image_path) ?: 'image/jpeg';
+                $filename = $category->image_filename ?: "category_{$category->id}.jpg";
+                $stream = Storage::disk('local')->readStream($category->image_path);
+
+                return response()->stream(function () use ($stream) {
+                    fpassthru($stream);
+
+                    if (is_resource($stream)) {
+                        fclose($stream);
+                    }
+                }, 200, [
+                    'Content-Type' => $mime,
+                    'Content-Disposition' => 'inline; filename="' . $filename . '"',
+                    'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
+                    'Pragma' => 'no-cache',
+                ]);
+            }
+        }
+    }
+
+    return response()->noContent();
+}
 
     public function destroy($id)
     {
@@ -1380,6 +1522,33 @@ class ProductsController extends Controller
             ->whereNull('deleted_at')
             ->findOrFail($id);
 
+        $category = $p->category;
+
+        $hasOwnImage =
+            !empty($p->image_path) ||
+            (
+                $this->hasProductColumn('image_blob') &&
+                array_key_exists('image_blob', $p->getAttributes()) &&
+                !empty($p->image_blob)
+            );
+
+        $hasCategoryImage = false;
+
+        if ($category) {
+            $hasCategoryImage =
+                (
+                    $this->hasCategoryColumn('image_blob') &&
+                    array_key_exists('image_blob', $category->getAttributes()) &&
+                    !empty($category->image_blob)
+                ) ||
+                (
+                    $this->hasCategoryColumn('image_path') &&
+                    !empty($category->image_path)
+                );
+        }
+
+        $hasImage = $hasOwnImage || $hasCategoryImage;
+
         return response()->json([
             'id' => $p->id,
             'sku' => $p->sku,
@@ -1387,11 +1556,11 @@ class ProductsController extends Controller
             'description' => $p->description,
 
             'category_id' => $p->category_id,
-            'category' => $p->category?->code ?? null,
-            'category_label' => $p->category?->name ?? null,
-            'category_code' => $p->category?->code ?? null,
-            'category_name' => $p->category?->name ?? null,
-            'category_is_mica' => $p->category ? $this->isMicasCategory((int) $p->category->id) : false,
+            'category' => $category?->code ?? null,
+            'category_label' => $category?->name ?? null,
+            'category_code' => $category?->code ?? null,
+            'category_name' => $category?->name ?? null,
+            'category_is_mica' => $category ? $this->isMicasCategory((int) $category->id) : false,
 
             'type' => $p->type,
             'material' => $p->material,
@@ -1411,18 +1580,19 @@ class ProductsController extends Controller
             'lens_type_id' => $p->lens_type_id,
             'material_id' => $p->material_id,
 
-            'sphere' => $p->sphere,
-            'cylinder' => $p->cylinder,
-            'axis' => $p->axis,
+            'sphere' => $p->sphere !== null ? (float) $p->sphere : null,
+            'cylinder' => $p->cylinder !== null ? (float) $p->cylinder : null,
+            'axis' => $p->axis !== null ? (int) $p->axis : null,
 
             'treatments' => $this->getTreatmentsForProduct((int) $p->id),
 
-            'imageUrl' => !empty($p->image_path)
-                ? url("/api/products/{$p->id}/image")
-                : null,
+            'imageUrl' => $hasImage ? url("/api/products/{$p->id}/image") : null,
+            'image_url' => $hasImage ? url("/api/products/{$p->id}/image") : null,
+            'has_image' => $hasImage,
+            'has_own_image' => $hasOwnImage,
+            'has_category_image' => $hasCategoryImage,
 
             'active' => (bool) $p->active,
-            'has_image' => !empty($p->image_path),
 
             'show_in_pos' => $this->hasProductColumn('show_in_pos')
                 ? (bool) ($p->show_in_pos ?? true)
@@ -1435,6 +1605,296 @@ class ProductsController extends Controller
             'is_temporary_order_item' => $this->hasProductColumn('is_temporary_order_item')
                 ? (bool) ($p->is_temporary_order_item ?? false)
                 : false,
+        ]);
+    }
+    public function bulkDestroy(Request $request)
+    {
+        $data = $request->validate([
+            'ids' => ['required', 'array', 'min:1'],
+            'ids.*' => ['required', 'integer'],
+        ]);
+
+        $ids = collect($data['ids'])
+            ->map(fn ($id) => (int) $id)
+            ->filter(fn ($id) => $id > 0)
+            ->unique()
+            ->values()
+            ->all();
+
+        if (empty($ids)) {
+            return response()->json([
+                'ok' => false,
+                'message' => 'No se recibieron productos válidos.',
+            ], 422);
+        }
+
+        $deleted = [];
+        $skipped = [];
+
+        DB::transaction(function () use ($ids, &$deleted, &$skipped) {
+            $products = Product::query()
+                ->whereIn('id', $ids)
+                ->whereNull('deleted_at')
+                ->get();
+
+            foreach ($ids as $id) {
+                $p = $products->firstWhere('id', $id);
+
+                if (!$p) {
+                    $skipped[] = [
+                        'id' => $id,
+                        'name' => null,
+                        'reason' => 'No existe o ya fue eliminado.',
+                    ];
+
+                    continue;
+                }
+
+                $inventory = DB::table('inventory')
+                    ->where('product_id', $p->id)
+                    ->first();
+
+                $reserved = (int) ($inventory->reserved ?? 0);
+
+                if ($reserved > 0) {
+                    $skipped[] = [
+                        'id' => (int) $p->id,
+                        'name' => $p->name,
+                        'reason' => 'Tiene stock reservado.',
+                    ];
+
+                    continue;
+                }
+
+                DB::table('products')
+                    ->where('id', $p->id)
+                    ->update([
+                        'active' => 0,
+                        'deleted_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+
+                $deleted[] = [
+                    'id' => (int) $p->id,
+                    'name' => $p->name,
+                ];
+            }
+        });
+
+        return response()->json([
+            'ok' => true,
+            'message' => 'Borrado masivo completado.',
+            'deleted_count' => count($deleted),
+            'skipped_count' => count($skipped),
+            'deleted' => $deleted,
+            'skipped' => $skipped,
+        ]);
+    }
+
+    public function thumb($id)
+    {
+        $thumbPath = "products/thumbs/product_{$id}.jpg";
+
+        if (Storage::disk('local')->exists($thumbPath)) {
+            $stream = Storage::disk('local')->readStream($thumbPath);
+
+            return response()->stream(function () use ($stream) {
+                fpassthru($stream);
+
+                if (is_resource($stream)) {
+                    fclose($stream);
+                }
+            }, 200, [
+                'Content-Type' => 'image/jpeg',
+                'Content-Disposition' => 'inline; filename="product_' . $id . '_thumb.jpg"',
+                'Cache-Control' => 'public, max-age=86400',
+            ]);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Validar que GD esté activo
+        |--------------------------------------------------------------------------
+        */
+        if (!function_exists('imagecreatefromstring')) {
+            return response()->json([
+                'ok' => false,
+                'message' => 'La extensión GD de PHP no está activa. Activa extension=gd en php.ini y reinicia Laravel.',
+            ], 500);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Producto
+        |--------------------------------------------------------------------------
+        */
+        $productColumns = ['id', 'category_id'];
+
+        foreach (['image_blob', 'image_path', 'image_mime', 'image_filename'] as $col) {
+            if ($this->hasProductColumn($col)) {
+                $productColumns[] = $col;
+            }
+        }
+
+        $p = Product::query()
+            ->select($productColumns)
+            ->where('id', $id)
+            ->whereNull('deleted_at')
+            ->first();
+
+        if (!$p) {
+            return response()->noContent();
+        }
+
+        $sourceBinary = null;
+
+        /*
+        |--------------------------------------------------------------------------
+        | 1) Imagen propia del producto en BLOB, si existe la columna
+        |--------------------------------------------------------------------------
+        */
+        if (
+            $this->hasProductColumn('image_blob') &&
+            array_key_exists('image_blob', $p->getAttributes()) &&
+            !empty($p->image_blob)
+        ) {
+            $sourceBinary = $p->image_blob;
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 2) Imagen propia del producto en storage/path
+        |--------------------------------------------------------------------------
+        */
+        if (
+            !$sourceBinary &&
+            $this->hasProductColumn('image_path') &&
+            !empty($p->image_path) &&
+            Storage::disk('local')->exists($p->image_path)
+        ) {
+            $sourceBinary = Storage::disk('local')->get($p->image_path);
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 3) Fallback: imagen heredada de la categoría
+        |--------------------------------------------------------------------------
+        */
+        if (!$sourceBinary && !empty($p->category_id)) {
+            $categoryColumns = ['id'];
+
+            foreach (['image_blob', 'image_path', 'image_mime', 'image_filename'] as $col) {
+                if ($this->hasCategoryColumn($col)) {
+                    $categoryColumns[] = $col;
+                }
+            }
+
+            $category = Category::query()
+                ->select($categoryColumns)
+                ->where('id', $p->category_id)
+                ->whereNull('deleted_at')
+                ->first();
+
+            if ($category) {
+                if (
+                    $this->hasCategoryColumn('image_blob') &&
+                    array_key_exists('image_blob', $category->getAttributes()) &&
+                    !empty($category->image_blob)
+                ) {
+                    $sourceBinary = $category->image_blob;
+                }
+
+                if (
+                    !$sourceBinary &&
+                    $this->hasCategoryColumn('image_path') &&
+                    !empty($category->image_path) &&
+                    Storage::disk('local')->exists($category->image_path)
+                ) {
+                    $sourceBinary = Storage::disk('local')->get($category->image_path);
+                }
+            }
+        }
+
+        if (!$sourceBinary) {
+            return response()->noContent();
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | 4) Crear miniatura con GD
+        |--------------------------------------------------------------------------
+        */
+        $sourceImage = @\imagecreatefromstring($sourceBinary);
+
+        if (!$sourceImage) {
+            return response()->noContent();
+        }
+
+        $srcWidth = \imagesx($sourceImage);
+        $srcHeight = \imagesy($sourceImage);
+
+        if ($srcWidth <= 0 || $srcHeight <= 0) {
+            \imagedestroy($sourceImage);
+            return response()->noContent();
+        }
+
+        $targetWidth = 360;
+        $targetHeight = 220;
+
+        $srcRatio = $srcWidth / $srcHeight;
+        $targetRatio = $targetWidth / $targetHeight;
+
+        if ($srcRatio > $targetRatio) {
+            $newWidth = $targetWidth;
+            $newHeight = (int) round($targetWidth / $srcRatio);
+        } else {
+            $newHeight = $targetHeight;
+            $newWidth = (int) round($targetHeight * $srcRatio);
+        }
+
+        $thumb = \imagecreatetruecolor($targetWidth, $targetHeight);
+
+        if (!$thumb) {
+            \imagedestroy($sourceImage);
+            return response()->noContent();
+        }
+
+        $white = \imagecolorallocate($thumb, 255, 255, 255);
+        \imagefill($thumb, 0, 0, $white);
+
+        $dstX = (int) floor(($targetWidth - $newWidth) / 2);
+        $dstY = (int) floor(($targetHeight - $newHeight) / 2);
+
+        \imagecopyresampled(
+            $thumb,
+            $sourceImage,
+            $dstX,
+            $dstY,
+            0,
+            0,
+            $newWidth,
+            $newHeight,
+            $srcWidth,
+            $srcHeight
+        );
+
+        ob_start();
+        \imagejpeg($thumb, null, 78);
+        $thumbBinary = ob_get_clean();
+
+        \imagedestroy($sourceImage);
+        \imagedestroy($thumb);
+
+        if (!$thumbBinary) {
+            return response()->noContent();
+        }
+
+        Storage::disk('local')->put($thumbPath, $thumbBinary);
+
+        return response($thumbBinary, 200, [
+            'Content-Type' => 'image/jpeg',
+            'Content-Disposition' => 'inline; filename="product_' . $id . '_thumb.jpg"',
+            'Cache-Control' => 'public, max-age=86400',
         ]);
     }
 }

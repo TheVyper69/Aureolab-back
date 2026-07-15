@@ -88,7 +88,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::get('/products', [ProductsController::class, 'index']);
         Route::get('/products/{id}/image', [ProductsController::class, 'image']);
-
+        Route::get('/products/{id}/thumb', [ProductsController::class, 'thumb']);
         Route::get('/inventory', [InventoryController::class, 'index']);
         Route::get('/inventory/low-stock', [InventoryController::class, 'lowStock']);
 
@@ -192,8 +192,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/products/{id}', [ProductsController::class, 'show']);
         Route::put('/products/{id}', [ProductsController::class, 'update']);
         Route::post('/products/{id}', [ProductsController::class, 'update']);
+        Route::delete('/products/bulk-delete', [ProductsController::class, 'bulkDestroy']);
         Route::delete('/products/{id}', [ProductsController::class, 'destroy']);
         Route::post('/products/{id}/stock', [ProductsController::class, 'addStock']);
+        
 
         /*
         |--------------------------------------------------------------------------
