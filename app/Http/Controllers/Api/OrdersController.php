@@ -723,7 +723,7 @@ class OrdersController extends Controller
                 'created_by_user_id' => $u->id,
                 'payment_method_id' => $data['payment_method_id'],
                 'payment_status' => 'pendiente',
-                'process_status' => 'en_proceso',
+                'process_status' => 'recibido',
                 'notes' => $data['notes'] ?? null,
                 'subtotal' => $subtotal,
                 'total' => $subtotal,
@@ -860,9 +860,9 @@ class OrdersController extends Controller
                 return response()->json(['message' => 'No autorizado'], 403);
             }
 
-            if ($role === 'optica' && $order->process_status !== 'en_proceso') {
+            if ($role === 'optica' && !in_array($order->process_status, ['recibido', 'en_proceso'], true)) {
                 return response()->json([
-                    'message' => 'La óptica solo puede cancelar cuando el pedido está en proceso',
+                    'message' => 'La óptica solo puede cancelar cuando el pedido está recibido',
                     'errors' => ['process_status' => ['Estado no cancelable para óptica']]
                 ], 422);
             }
@@ -934,6 +934,42 @@ class OrdersController extends Controller
         });
     }
 
+    private function normalizeProcessStatus(?string $status): string
+    {
+        $status = trim((string) ($status ?: 'recibido'));
+
+        return match ($status) {
+            'en_proceso' => 'recibido',
+            'en_preparacion' => 'en_corte',
+            default => $status,
+        };
+    }
+
+    private function allowedProcessFlow(): array
+    {
+        return [
+            'recibido',
+            'surtido',
+            'en_corte',
+            'listo_para_entregar',
+            'entregado',
+        ];
+    }
+
+    private function processStatusLabel(string $status): string
+    {
+        return match ($this->normalizeProcessStatus($status)) {
+            'recibido' => 'Recibido',
+            'surtido' => 'Surtido',
+            'en_corte' => 'En corte',
+            'listo_para_entregar' => 'Listo para entregar',
+            'entregado' => 'Entregado',
+            'revision' => 'En revisión',
+            'cancelado' => 'Cancelado',
+            default => $status,
+        };
+    }
+
     public function update(Request $request, $id)
     {
         $u = $request->user();
@@ -945,7 +981,10 @@ class OrdersController extends Controller
 
         $data = $request->validate([
             'payment_status' => ['nullable', 'in:pendiente,pagado'],
-            'process_status' => ['nullable', 'in:en_proceso,listo_para_entregar,entregado,revision,en_preparacion,cancelado'],
+            'process_status' => [
+                'nullable',
+                'in:recibido,surtido,en_corte,listo_para_entregar,entregado,revision,cancelado,en_proceso,en_preparacion'
+            ],
         ]);
 
         return DB::transaction(function () use ($id, $u, $role, $data) {
@@ -956,11 +995,21 @@ class OrdersController extends Controller
                 ->findOrFail($id);
 
             $oldPayment = $order->payment_status;
-            $oldProcess = $order->process_status;
+            $oldProcess = $this->normalizeProcessStatus($order->process_status);
 
-            $newPayment = array_key_exists('payment_status', $data) ? $data['payment_status'] : $oldPayment;
-            $newProcess = array_key_exists('process_status', $data) ? $data['process_status'] : $oldProcess;
+            $newPayment = array_key_exists('payment_status', $data)
+                ? $data['payment_status']
+                : $oldPayment;
 
+            $newProcess = array_key_exists('process_status', $data)
+                ? $this->normalizeProcessStatus($data['process_status'])
+                : $oldProcess;
+
+            /*
+            |--------------------------------------------------------------------------
+            | Validaciones por rol
+            |--------------------------------------------------------------------------
+            */
             if ($role === 'employee') {
                 if ($newPayment !== $oldPayment) {
                     return response()->json([
@@ -985,8 +1034,49 @@ class OrdersController extends Controller
                         'message' => 'Solo admin puede cancelar pedidos desde esta acción'
                     ], 403);
                 }
+
+                $flow = $this->allowedProcessFlow();
+                $oldIndex = array_search($oldProcess, $flow, true);
+                $newIndex = array_search($newProcess, $flow, true);
+
+                if ($oldIndex === false || $newIndex === false || $newIndex < $oldIndex) {
+                    return response()->json([
+                        'message' => 'El empleado solo puede avanzar el pedido en el flujo permitido'
+                    ], 403);
+                }
             }
 
+            if ($role === 'admin') {
+                if ($newProcess === 'revision' && $oldProcess !== 'entregado') {
+                    return response()->json([
+                        'message' => 'Admin solo puede mandar a revisión pedidos entregados'
+                    ], 403);
+                }
+
+                if ($newProcess === 'cancelado') {
+                    return response()->json([
+                        'message' => 'El estado cancelado no se cambia desde el selector. Usa el botón Cancelar pedido.'
+                    ], 403);
+                }
+
+                if ($oldProcess !== 'revision' && $newProcess !== 'revision') {
+                    $flow = $this->allowedProcessFlow();
+                    $oldIndex = array_search($oldProcess, $flow, true);
+                    $newIndex = array_search($newProcess, $flow, true);
+
+                    if ($oldIndex === false || $newIndex === false || $newIndex < $oldIndex) {
+                        return response()->json([
+                            'message' => 'Ese cambio de estado no está permitido'
+                        ], 403);
+                    }
+                }
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Estatus de pago
+            |--------------------------------------------------------------------------
+            */
             if ($newPayment !== $oldPayment) {
                 $order->payment_status = $newPayment;
 
@@ -997,6 +1087,11 @@ class OrdersController extends Controller
                 }
             }
 
+            /*
+            |--------------------------------------------------------------------------
+            | Estatus de proceso
+            |--------------------------------------------------------------------------
+            */
             if ($newProcess !== $oldProcess) {
                 if ($newProcess === 'entregado' && $oldProcess !== 'entregado') {
                     foreach ($order->items as $it) {
