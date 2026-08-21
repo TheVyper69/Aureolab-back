@@ -980,6 +980,7 @@ class OrdersController extends Controller
         }
 
         $data = $request->validate([
+            'payment_method_id' => ['nullable', 'integer', 'exists:payment_methods,id'],
             'payment_status' => ['nullable', 'in:pendiente,pagado'],
             'process_status' => [
                 'nullable',
@@ -994,8 +995,13 @@ class OrdersController extends Controller
                 ->lockForUpdate()
                 ->findOrFail($id);
 
+            $oldPaymentMethodId = (int) $order->payment_method_id;
             $oldPayment = $order->payment_status;
             $oldProcess = $this->normalizeProcessStatus($order->process_status);
+
+            $newPaymentMethodId = array_key_exists('payment_method_id', $data)
+            ? (int) $data['payment_method_id']
+            : $oldPaymentMethodId;
 
             $newPayment = array_key_exists('payment_status', $data)
                 ? $data['payment_status']
@@ -1011,6 +1017,12 @@ class OrdersController extends Controller
             |--------------------------------------------------------------------------
             */
             if ($role === 'employee') {
+                if ($newPaymentMethodId !== $oldPaymentMethodId) {
+                    return response()->json([
+                        'message' => 'Solo admin puede cambiar el método de pago'
+                    ], 403);
+                }
+
                 if ($newPayment !== $oldPayment) {
                     return response()->json([
                         'message' => 'Solo admin puede cambiar el estatus de pago'
@@ -1070,6 +1082,16 @@ class OrdersController extends Controller
                         ], 403);
                     }
                 }
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Método de pago
+            |--------------------------------------------------------------------------
+            */
+
+            if ($newPaymentMethodId !== $oldPaymentMethodId) {
+                $order->payment_method_id = $newPaymentMethodId;
             }
 
             /*
@@ -1171,6 +1193,7 @@ class OrdersController extends Controller
             return response()->json([
                 'ok' => true,
                 'order_id' => $order->id,
+                'payment_method_id' => (int) $order->payment_method_id,
                 'payment_status' => $order->payment_status,
                 'paid_at' => $order->paid_at,
                 'process_status' => $order->process_status,
