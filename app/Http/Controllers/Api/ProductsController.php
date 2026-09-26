@@ -168,6 +168,45 @@ class ProductsController extends Controller
         return $scaled % 25 === 0;
     }
 
+    private function isAdditionLensTypeId($lensTypeId): bool
+    {
+        if (!$lensTypeId) return false;
+
+        $lt = DB::table('lens_types')
+            ->where('id', (int) $lensTypeId)
+            ->select('id', 'code', 'name')
+            ->first();
+
+        if (!$lt) return false;
+
+        $text = Str::ascii(strtoupper(trim(($lt->code ?? '') . ' ' . ($lt->name ?? ''))));
+        $text = preg_replace('/\s+/', ' ', $text);
+
+        return str_contains($text, 'FLAT TOP')
+            || str_contains($text, 'FLATTOP')
+            || str_contains($text, 'YOUNGER')
+            || str_contains($text, 'PROGRESIVO')
+            || str_contains($text, 'PROGRESSIVE');
+    }
+
+    private function normalizeAddition($value)
+    {
+        if ($value === null || $value === '') return null;
+
+        $addition = $this->opticalNumber($value);
+
+        if ($addition < 1.00 || $addition > 3.50 || !$this->isQuarterStep($addition)) {
+            abort(response()->json([
+                'message' => 'Error de validación',
+                'errors' => [
+                    'addition' => ['La adición debe estar entre 1.00 y 3.50 en incrementos de 0.25.']
+                ]
+            ], 422));
+        }
+
+        return $addition;
+    }
+
     private function opticalNumber($value): float
     {
         return round((float) $value, 2);
@@ -245,6 +284,11 @@ class ProductsController extends Controller
             $data['sphere'] = null;
             $data['cylinder'] = null;
             $data['axis'] = null;
+
+            if ($this->hasProductColumn('addition')) {
+                $data['addition'] = null;
+            }
+
             return;
         }
 
@@ -329,6 +373,31 @@ class ProductsController extends Controller
                     'axis' => ['El eje debe estar entre 1 y 180.']
                 ]
             ], 422));
+        }
+
+        if ($this->hasProductColumn('addition')) {
+            $effectiveLensTypeId = array_key_exists('lens_type_id', $data)
+                ? ($data['lens_type_id'] ?? null)
+                : ($product?->lens_type_id ?? null);
+
+            $requiresAddition = $this->isAdditionLensTypeId($effectiveLensTypeId);
+
+            $rawAddition = array_key_exists('addition', $data)
+                ? ($data['addition'] ?? null)
+                : ($product?->addition ?? null);
+
+            if ($requiresAddition && ($rawAddition === null || $rawAddition === '')) {
+                abort(response()->json([
+                    'message' => 'Error de validación',
+                    'errors' => [
+                        'addition' => ['La adición es obligatoria para Flat Top, Younger y Progresivos.']
+                    ]
+                ], 422));
+            }
+
+            $data['addition'] = $requiresAddition
+                ? $this->normalizeAddition($rawAddition)
+                : null;
         }
     }
 
@@ -522,6 +591,7 @@ class ProductsController extends Controller
             'sphere' => $p->sphere !== null ? (float) $p->sphere : null,
             'cylinder' => $p->cylinder !== null ? (float) $p->cylinder : null,
             'axis' => $p->axis !== null ? (int) $p->axis : null,
+            'addition' => $this->hasProductColumn('addition') && $p->addition !== null ? (float) $p->addition : null,
 
             'treatments' => $this->getTreatmentsForProduct((int) $p->id),
 
@@ -951,6 +1021,10 @@ class ProductsController extends Controller
             $select[] = 'c.sale_price as category_sale_price';
         }
 
+        if ($this->hasProductColumn('addition')) {
+            $select[] = 'p.addition';
+        }
+
         $rows = $query
             ->orderBy('p.name')
             ->select($select)
@@ -996,6 +1070,7 @@ class ProductsController extends Controller
                         'sphere' => $r->sphere !== null ? (float) $r->sphere : null,
                         'cylinder' => $r->cylinder !== null ? (float) $r->cylinder : null,
                         'axis' => $r->axis !== null ? (int) $r->axis : null,
+                        'addition' => property_exists($r, 'addition') && $r->addition !== null ? (float) $r->addition : null,
 
                         'treatments' => $this->mapTreatments($treatmentsByProduct->get($r->product_id, [])),
 
@@ -1054,6 +1129,7 @@ class ProductsController extends Controller
             'sphere'   => ['nullable', 'numeric', 'between:-40,40'],
             'cylinder' => ['nullable', 'numeric', 'between:-40,0'],
             'axis'     => ['nullable', 'integer', 'between:1,180'],
+            'addition' => ['nullable', 'numeric', 'between:1,3.5'],
 
             'treatments' => ['nullable', 'array'],
             'treatments.*' => ['integer', 'exists:treatments,id'],
@@ -1126,6 +1202,10 @@ class ProductsController extends Controller
             $p->cylinder = array_key_exists('cylinder', $data) ? $data['cylinder'] : null;
             $p->axis = array_key_exists('axis', $data) ? $data['axis'] : null;
 
+            if ($this->hasProductColumn('addition')) {
+                $p->addition = array_key_exists('addition', $data) ? $data['addition'] : null;
+            }
+
             if ($this->isMicasCategory((int) $category->id)) {
                 $p->axis = null;
             }
@@ -1192,6 +1272,7 @@ class ProductsController extends Controller
             'sphere' => ['nullable', 'numeric', 'between:-40,40'],
             'cylinder' => ['nullable', 'numeric', 'between:-40,0'],
             'axis' => ['nullable', 'integer', 'between:1,180'],
+            'addition' => ['nullable', 'numeric', 'between:1,3.5'],
 
             'treatments' => ['nullable', 'array'],
             'treatments.*' => ['integer', 'exists:treatments,id'],
@@ -1260,6 +1341,10 @@ class ProductsController extends Controller
         if (array_key_exists('sphere', $data)) $p->sphere = isset($data['sphere']) ? (float) $data['sphere'] : null;
         if (array_key_exists('cylinder', $data)) $p->cylinder = isset($data['cylinder']) ? (float) $data['cylinder'] : null;
         if (array_key_exists('axis', $data)) $p->axis = isset($data['axis']) ? (int) $data['axis'] : null;
+
+        if ($this->hasProductColumn('addition') && array_key_exists('addition', $data)) {
+            $p->addition = isset($data['addition']) ? (float) $data['addition'] : null;
+        }
 
         if ($this->isMicasCategory($effectiveCategoryId)) {
             $p->axis = null;
@@ -1583,6 +1668,7 @@ class ProductsController extends Controller
             'sphere' => $p->sphere !== null ? (float) $p->sphere : null,
             'cylinder' => $p->cylinder !== null ? (float) $p->cylinder : null,
             'axis' => $p->axis !== null ? (int) $p->axis : null,
+            'addition' => $this->hasProductColumn('addition') && $p->addition !== null ? (float) $p->addition : null,
 
             'treatments' => $this->getTreatmentsForProduct((int) $p->id),
 

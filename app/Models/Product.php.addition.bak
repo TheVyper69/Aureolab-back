@@ -12,7 +12,6 @@ class Product extends Model
         'buy_price','sale_price','min_stock','max_stock',
         'supplier_id',
         'image_filename','image_mime','image_blob',
-        'addition',
         'active'
     ];
 
@@ -21,7 +20,6 @@ class Product extends Model
         'sale_price' => 'decimal:2',
         'min_stock' => 'integer',
         'max_stock' => 'integer',
-        'addition' => 'decimal:2',
         'active' => 'boolean',
         'deleted_at' => 'datetime',
     ];
@@ -44,6 +42,4 @@ class Product extends Model
         return $this->hasMany(ProductVariant::class);
     }
 }
-
-
 

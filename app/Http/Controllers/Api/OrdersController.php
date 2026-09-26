@@ -46,7 +46,55 @@ class OrdersController extends Controller
         return (int) $cat->id;
     }
 
-    private function formatRefractionText(?float $sphere, ?float $cylinder, ?int $axis): ?string
+    private function isAdditionLensTypeId($lensTypeId): bool
+    {
+        if (!$lensTypeId) return false;
+
+        $lt = DB::table('lens_types')
+            ->where('id', (int) $lensTypeId)
+            ->select('id', 'code', 'name')
+            ->first();
+
+        if (!$lt) return false;
+
+        $text = Str::ascii(strtoupper(trim(($lt->code ?? '') . ' ' . ($lt->name ?? ''))));
+        $text = preg_replace('/\s+/', ' ', $text);
+
+        return str_contains($text, 'FLAT TOP')
+            || str_contains($text, 'FLATTOP')
+            || str_contains($text, 'YOUNGER')
+            || str_contains($text, 'PROGRESIVO')
+            || str_contains($text, 'PROGRESSIVE');
+    }
+
+    private function isQuarterStep($value): bool
+    {
+        if ($value === null || $value === '') return true;
+
+        $scaled = round(((float) $value) * 100);
+
+        return $scaled % 25 === 0;
+    }
+
+    private function normalizeAddition($value, string $fieldKey = 'addition')
+    {
+        if ($value === null || $value === '') return null;
+
+        $addition = round((float) $value, 2);
+
+        if ($addition < 1.00 || $addition > 3.50 || !$this->isQuarterStep($addition)) {
+            abort(response()->json([
+                'message' => 'Error de validación',
+                'errors' => [
+                    $fieldKey => ['La adición debe estar entre 1.00 y 3.50 en incrementos de 0.25.']
+                ]
+            ], 422));
+        }
+
+        return $addition;
+    }
+
+    private function formatRefractionText(?float $sphere, ?float $cylinder, ?int $axis, ?float $addition = null): ?string
     {
         $parts = [];
 
@@ -60,6 +108,10 @@ class OrdersController extends Controller
 
         if (!is_null($axis)) {
             $parts[] = 'Eje: ' . $axis;
+        }
+
+        if (!is_null($addition)) {
+            $parts[] = 'Adición: ' . number_format($addition, 2, '.', '');
         }
 
         return count($parts) ? implode(' · ', $parts) : null;
@@ -131,6 +183,23 @@ class OrdersController extends Controller
                 ], 422));
             }
         }
+
+        $lensTypeId = $itemData['lens_type_id'] ?? null;
+        $rawAddition = $itemData['addition'] ?? null;
+        $requiresAddition = $this->isAdditionLensTypeId($lensTypeId);
+
+        if ($requiresAddition && ($rawAddition === null || $rawAddition === '')) {
+            abort(response()->json([
+                'message' => 'Error de validación',
+                'errors' => [
+                    "items.{$idx}.addition" => ['La adición es obligatoria para Flat Top, Younger y Progresivos.']
+                ]
+            ], 422));
+        }
+
+        if ($rawAddition !== null && $rawAddition !== '') {
+            $this->normalizeAddition($rawAddition, "items.{$idx}.addition");
+        }
     }
 
     private function treatmentsForOrderItems(array $orderItemIds)
@@ -168,6 +237,7 @@ class OrdersController extends Controller
                 'cb.order_item_id',
                 'cb.reflection',
                 'cb.lens_type_id',
+                'cb.addition',
                 'cb.frame_height',
                 'cb.blank_height',
                 'cb.observations',
@@ -219,6 +289,10 @@ class OrdersController extends Controller
             'm.name as material_name',
         ];
 
+        if ($this->hasColumn('products', 'addition')) {
+            $selects[] = 'p.addition';
+        }
+
         if ($this->hasColumn('products', 'brand')) {
             $selects[] = 'p.brand';
         }
@@ -237,6 +311,10 @@ class OrdersController extends Controller
 
         if ($this->hasColumn('products', 'show_in_pos')) {
             $selects[] = 'p.show_in_pos';
+        }
+
+        if ($this->hasColumn('products', 'addition')) {
+            $selects[] = 'p.addition';
         }
 
         return DB::table('products as p')
@@ -316,6 +394,9 @@ class OrdersController extends Controller
                             'sphere' => $sphere,
                             'cylinder' => $cylinder,
                             'axis' => $axis,
+                            'addition' => $customBisel && $customBisel->addition !== null
+                                ? (float) $customBisel->addition
+                                : (property_exists($detail, 'addition') && $detail->addition !== null ? (float) $detail->addition : null),
                             'lens_type_id' => $customBisel?->lens_type_id
                                 ? (int) $customBisel->lens_type_id
                                 : ($detail->lens_type_id ? (int) $detail->lens_type_id : null),
@@ -371,6 +452,7 @@ class OrdersController extends Controller
                         'sphere' => $sphere,
                         'cylinder' => $cylinder,
                         'axis' => $axis,
+                        'addition' => property_exists($detail, 'addition') && $detail->addition !== null ? (float) $detail->addition : null,
 
                         'is_custom' => (int) ($detail->is_custom ?? 0),
                         'show_in_pos' => (int) ($detail->show_in_pos ?? 1),
@@ -419,12 +501,16 @@ class OrdersController extends Controller
             ? (int) $itemData['axis']
             : null;
 
+        $addition = array_key_exists('addition', $itemData) && $itemData['addition'] !== null && $itemData['addition'] !== ''
+            ? $this->normalizeAddition($itemData['addition'])
+            : null;
+
         $reflection = trim((string) ($itemData['reflection'] ?? ''));
         $observations = trim((string) ($itemData['observations'] ?? ''));
         $unitPrice = (float) ($itemData['unit_price'] ?? 0);
         $customName = trim((string) ($itemData['name'] ?? ''));
 
-        $refractionText = $this->formatRefractionText($sphere, $cylinder, $axis);
+        $refractionText = $this->formatRefractionText($sphere, $cylinder, $axis, $addition);
 
         $nameParts = [$customName !== '' ? $customName : 'Biselado personalizado'];
 
@@ -457,6 +543,10 @@ class OrdersController extends Controller
             'updated_at' => now(),
             'deleted_at' => null,
         ];
+
+        if ($this->hasColumn('products', 'addition')) {
+            $payload['addition'] = $addition;
+        }
 
         if ($this->hasColumn('products', 'brand')) {
             $payload['brand'] = null;
@@ -579,6 +669,7 @@ class OrdersController extends Controller
 
             'items.*.sphere' => ['nullable', 'numeric', 'between:-40,40'],
             'items.*.cylinder' => ['nullable', 'numeric', 'lt:0'],
+            'items.*.addition' => ['nullable', 'numeric', 'between:1,3.5'],
 
             'items.*.lens_type_id' => ['nullable', 'integer', 'exists:lens_types,id'],
             'items.*.frame_height' => ['nullable', 'numeric', 'min:0'],
@@ -710,6 +801,7 @@ class OrdersController extends Controller
                         'sphere' => $it['sphere'] ?? null,
                         'cylinder' => $it['cylinder'] ?? null,
                         'axis' => $it['axis'] ?? null,
+                        'addition' => $it['addition'] ?? null,
                         'lens_type_id' => $it['lens_type_id'] ?? null,
                         'frame_height' => $it['frame_height'] ?? null,
                         'blank_height' => $it['blank_height'] ?? null,
@@ -766,10 +858,14 @@ class OrdersController extends Controller
                         ? (int) $it['custom_bisel_detail']['axis']
                         : null;
 
-                    $reflection = $it['custom_bisel_detail']['reflection']
-                        ?? $this->formatRefractionText($sphere, $cylinder, $axis);
+                    $addition = isset($it['custom_bisel_detail']['addition']) && $it['custom_bisel_detail']['addition'] !== ''
+                        ? $this->normalizeAddition($it['custom_bisel_detail']['addition'])
+                        : null;
 
-                    DB::table('order_item_custom_bisel')->insert([
+                    $reflection = $it['custom_bisel_detail']['reflection']
+                        ?? $this->formatRefractionText($sphere, $cylinder, $axis, $addition);
+
+                    $customBiselInsert = [
                         'order_item_id' => $orderItem->id,
                         'reflection' => $reflection,
                         'lens_type_id' => !empty($it['custom_bisel_detail']['lens_type_id'])
@@ -784,7 +880,13 @@ class OrdersController extends Controller
                         'observations' => $it['custom_bisel_detail']['observations'] ?? null,
                         'created_at' => now(),
                         'updated_at' => now(),
-                    ]);
+                    ];
+
+                    if ($this->hasColumn('order_item_custom_bisel', 'addition')) {
+                        $customBiselInsert['addition'] = $addition;
+                    }
+
+                    DB::table('order_item_custom_bisel')->insert($customBiselInsert);
                 }
 
                 if (empty($it['custom_bisel'])) {
